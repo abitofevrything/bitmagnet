@@ -16,6 +16,7 @@ import (
 	"github.com/bitmagnet-io/bitmagnet/internal/protocol/metainfo"
 	"github.com/bitmagnet-io/bitmagnet/internal/protocol/metainfo/banning"
 	"github.com/bitmagnet-io/bitmagnet/internal/protocol/metainfo/metainforequester"
+	lru "github.com/hashicorp/golang-lru/v2/expirable"
 	"github.com/prometheus/client_golang/prometheus"
 	boom "github.com/tylertreat/BoomFilters"
 	"go.uber.org/zap"
@@ -48,8 +49,9 @@ type crawler struct {
 	// containing every hash it has already encountered.
 	// This avoids multiple attempts to crawl the same hash, and takes a lot of load off the database query
 	// that checks if a hash has already been indexed.
-	ignoreHashes    *ignoreHashes
-	blockingManager blocking.Manager
+	ignoreHashes            *ignoreHashes
+	recentlyDiscoveredNodes *lru.LRU[netip.AddrPort, struct{}]
+	blockingManager         blocking.Manager
 	// soughtNodeID is a random node ID used as the target for find_node and sample_infohashes requests.
 	// It is rotated every 10 seconds.
 	soughtNodeID   *concurrency.AtomicValue[protocol.ID]

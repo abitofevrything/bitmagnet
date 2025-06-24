@@ -2,6 +2,7 @@ package dhtcrawler
 
 import (
 	"context"
+	"net/netip"
 	"time"
 
 	"github.com/bitmagnet-io/bitmagnet/internal/blocking"
@@ -15,6 +16,7 @@ import (
 	"github.com/bitmagnet-io/bitmagnet/internal/protocol/metainfo/banning"
 	"github.com/bitmagnet-io/bitmagnet/internal/protocol/metainfo/metainforequester"
 	"github.com/bitmagnet-io/bitmagnet/internal/worker"
+	lru "github.com/hashicorp/golang-lru/v2/expirable"
 	"github.com/prometheus/client_golang/prometheus"
 	boom "github.com/tylertreat/BoomFilters"
 	"go.uber.org/fx"
@@ -121,10 +123,15 @@ func New(params Params) Result {
 							bloom: boom.NewStableBloomFilter(10_000_000, 2, 0.001),
 						},
 						blockingManager: blockingManager,
-						soughtNodeID:    &concurrency.AtomicValue[protocol.ID]{},
-						stopped:         make(chan struct{}),
-						persistedTotal:  persistedTotal,
-						logger:          params.Logger.Named("dht_crawler"),
+						recentlyDiscoveredNodes: lru.NewLRU[netip.AddrPort, struct{}](
+							20_000*scalingFactor,
+							nil,
+							time.Hour,
+						),
+						soughtNodeID:   &concurrency.AtomicValue[protocol.ID]{},
+						stopped:        make(chan struct{}),
+						persistedTotal: persistedTotal,
+						logger:         params.Logger.Named("dht_crawler"),
 					}
 					c.soughtNodeID.Set(protocol.RandomNodeID())
 

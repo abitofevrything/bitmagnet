@@ -45,11 +45,16 @@ func (c *crawler) runDiscoveredNodes(ctx context.Context) {
 					addrs = append(addrs, p.Addr().Addr())
 				}
 			}
-			// for any discovered node not already in the routing table,
-			// we will block until it can be sent to any one of the pipeline channels.
-			unknownAddrs := c.kTable.FilterKnownAddrs(addrs)
-			for _, addr := range unknownAddrs {
+
+			for _, addr := range addrs {
 				p := m[addr.String()]
+
+				// Don't reprocess nodes we already visited recently.
+				if c.recentlyDiscoveredNodes.Contains(p.Addr()) {
+					continue
+				}
+				c.recentlyDiscoveredNodes.Add(p.Addr(), struct{}{})
+
 				select {
 				case <-ctx.Done():
 					return
