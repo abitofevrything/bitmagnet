@@ -31,6 +31,10 @@ func NewDiscoveredNodes(params DiscoveredNodesParams) DiscoveredNodesResult {
 }
 
 func (c *crawler) runDiscoveredNodes(ctx context.Context) {
+	counts := make(map[netip.Addr]int)
+	total_discovered := 0
+	newly_discovered := 0
+
 	for {
 		select {
 		case <-ctx.Done():
@@ -49,6 +53,17 @@ func (c *crawler) runDiscoveredNodes(ctx context.Context) {
 			// we will block until it can be sent to any one of the pipeline channels.
 			unknownAddrs := c.kTable.FilterKnownAddrs(addrs)
 			for _, addr := range unknownAddrs {
+				existing_count := counts[addr]
+				if existing_count == 0 {
+					newly_discovered++
+				}
+				total_discovered++
+
+				existing_count++
+				counts[addr] = existing_count
+
+				c.logger.Infof("New node ratio: %d/%d (%.3f)", newly_discovered, total_discovered, float64(newly_discovered)/float64(total_discovered))
+
 				p := m[addr.String()]
 				select {
 				case <-ctx.Done():
