@@ -37,6 +37,8 @@ func New(p Params) Result {
 			p.NodeID,
 			nodesK,
 			func(id ID, addr netip.AddrPort) *node {
+				rm.putAddrPeerID(addr.Addr(), id)
+
 				return &node{
 					nodeBase: nodeBase{
 						id:   id,
