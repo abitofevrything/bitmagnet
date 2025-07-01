@@ -13,7 +13,6 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 	"go.uber.org/fx"
 	"go.uber.org/zap"
-	"golang.org/x/time/rate"
 )
 
 type Params struct {
@@ -43,28 +42,25 @@ func New(p Params) Result {
 	lastResponses := &concurrency.AtomicValue[LastResponses]{}
 	collector := newPrometheusCollector()
 	ls := lazy.New(func() (Server, error) {
-		s := queryLimiter{
-			server: prometheusServerWrapper{
-				prometheusCollector: collector,
-				server: healthCollector{
-					baseServer: &server{
-						stopped: make(chan struct{}),
-						localAddr: netip.AddrPortFrom(
-							netip.IPv4Unspecified(),
-							p.Config.Port,
-						),
-						socket:           NewSocket(),
-						queries:          make(map[string]chan dht.RecvMsg),
-						queryTimeout:     p.Config.QueryTimeout,
-						responder:        p.Responder,
-						responderTimeout: time.Second * 5,
-						idIssuer:         &variantIDIssuer{},
-						logger:           p.Logger.Named(subsystem),
-					},
-					lastResponses: lastResponses,
+		s := prometheusServerWrapper{
+			prometheusCollector: collector,
+			server: healthCollector{
+				baseServer: &server{
+					stopped: make(chan struct{}),
+					localAddr: netip.AddrPortFrom(
+						netip.IPv4Unspecified(),
+						p.Config.Port,
+					),
+					socket:           NewSocket(),
+					queries:          make(map[string]chan dht.RecvMsg),
+					queryTimeout:     p.Config.QueryTimeout,
+					responder:        p.Responder,
+					responderTimeout: time.Second * 5,
+					idIssuer:         &variantIDIssuer{},
+					logger:           p.Logger.Named(subsystem),
 				},
+				lastResponses: lastResponses,
 			},
-			queryLimiter: concurrency.NewKeyedLimiter(rate.Every(time.Second), 4, 1000, time.Second*20),
 		}
 		if err := s.start(); err != nil {
 			return nil, fmt.Errorf("could not start server: %w", err)
