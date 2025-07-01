@@ -27,7 +27,7 @@ func (s queryLimiter) Query(
 	q string,
 	args dht.MsgArgs,
 ) (r dht.RecvMsg, err error) {
-	if limitErr := s.queryLimiter.Wait(ctx, addr.Addr().String()); limitErr != nil {
+	if limitErr := s.queryLimiter.Wait(ctx, addr.String()); limitErr != nil {
 		return r, limitErr
 	}
 
