@@ -3,6 +3,7 @@ package dhtcrawler
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net/netip"
 	"sync"
 
@@ -27,6 +28,11 @@ func (c *crawler) runRequestMetaInfo(ctx context.Context) {
 	})
 }
 
+var (
+	success = 0
+	err     = 0
+)
+
 func (c *crawler) doRequestMetaInfo(
 	ctx context.Context,
 	hash protocol.ID,
@@ -41,23 +47,65 @@ func (c *crawler) doRequestMetaInfo(
 		errsMutex.Unlock()
 	}
 
+	ch := make(chan *metainforequester.Response)
+	remaining := len(peers)
+	blocked := false
+	remaining_mutex := &sync.Mutex{}
+
 	for _, p := range peers {
-		res, err := c.metainfoRequester.Request(ctx, hash, p)
-		if err != nil {
-			addErr(err)
-			continue
-		}
+		go func() {
+			defer func() {
+				remaining_mutex.Lock()
+				remaining--
 
-		if banErr := c.banningChecker.Check(res.Info); banErr != nil {
-			_ = c.blockingManager.Block(ctx, []protocol.ID{hash}, false)
-			c.requestMetaInfoTotal.With(prometheus.Labels{"result": "blocked"}).Inc()
-			return metainforequester.Response{}, banErr
-		}
+				if remaining <= 0 {
+					close(ch)
+				}
 
-		c.requestMetaInfoTotal.With(prometheus.Labels{"result": "persist_torrents"}).Inc()
-		return res, nil
+				remaining_mutex.Unlock()
+			}()
+
+			res, err := c.metainfoRequester.Request(ctx, hash, p)
+			if err != nil {
+				addErr(err)
+				return
+			}
+
+			remaining_mutex.Lock()
+			defer remaining_mutex.Unlock()
+			defer close(ch)
+
+			if remaining == 0 {
+				return
+			}
+			remaining = 0
+
+			if banErr := c.banningChecker.Check(res.Info); banErr != nil {
+				blocked = true
+				_ = c.blockingManager.Block(ctx, []protocol.ID{hash}, false)
+				return
+			}
+
+			ch <- &res
+		}()
 	}
 
-	c.requestMetaInfoTotal.With(prometheus.Labels{"result": "error"}).Inc()
-	return metainforequester.Response{}, errors.Join(errs...)
+	res := <-ch
+
+	fmt.Printf("%d/%d\n", success, err)
+
+	if res == nil {
+		err++
+		if !blocked {
+			c.requestMetaInfoTotal.With(prometheus.Labels{"result": "error"}).Inc()
+		} else {
+			c.requestMetaInfoTotal.With(prometheus.Labels{"result": "blocked"}).Inc()
+		}
+
+		return metainforequester.Response{}, errors.Join(errs...)
+	}
+
+	success++
+	c.requestMetaInfoTotal.With(prometheus.Labels{"result": "persist_torrents"}).Inc()
+	return *res, nil
 }
