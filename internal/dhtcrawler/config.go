@@ -22,6 +22,8 @@ type Config struct {
 	// RescrapeThreshold is the amount of time that must pass before a torrent is rescraped
 	// to count seeders and leechers.
 	RescrapeThreshold time.Duration
+	// Currently only supports UDP trackers.
+	Trackers []string
 }
 
 func NewDefaultConfig() Config {
@@ -32,6 +34,12 @@ func NewDefaultConfig() Config {
 		SaveFilesThreshold:           100,
 		SavePieces:                   false,
 		RescrapeThreshold:            time.Hour * 24 * 30,
+		Trackers: []string{
+			"udp://tracker.torrent.eu.org:451/announce",
+			"udp://tracker.opentrackr.org:1337/announce",
+			"udp://open.stealth.si:80/announce",
+			"udp://exodus.desync.com:6969/announce",
+		},
 	}
 }
 

@@ -14,6 +14,7 @@ import (
 	"github.com/bitmagnet-io/bitmagnet/internal/protocol/dht/ktable"
 	"github.com/bitmagnet-io/bitmagnet/internal/protocol/metainfo/banning"
 	"github.com/bitmagnet-io/bitmagnet/internal/protocol/metainfo/metainforequester"
+	"github.com/bitmagnet-io/bitmagnet/internal/protocol/tracker"
 	"github.com/bitmagnet-io/bitmagnet/internal/worker"
 	"github.com/prometheus/client_golang/prometheus"
 	boom "github.com/tylertreat/BoomFilters"
@@ -191,6 +192,11 @@ func New(params Params) Result {
 					if err != nil {
 						return err
 					}
+					tracker_client, err := tracker.New()
+					if err != nil {
+						return err
+					}
+
 					c = crawler{
 						kTable:                       params.KTable,
 						client:                       cl,
@@ -232,6 +238,8 @@ func New(params Params) Result {
 						saveFilesThreshold: params.Config.SaveFilesThreshold,
 						savePieces:         params.Config.SavePieces,
 						rescrapeThreshold:  params.Config.RescrapeThreshold,
+						trackers:           params.Config.Trackers,
+						tracker_client:     tracker_client,
 						dao:                query,
 						ignoreHashes: &ignoreFilter{
 							bloom: boom.NewStableBloomFilter(10_000_000, 2, 0.001),

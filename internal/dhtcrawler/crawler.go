@@ -16,6 +16,7 @@ import (
 	"github.com/bitmagnet-io/bitmagnet/internal/protocol/metainfo"
 	"github.com/bitmagnet-io/bitmagnet/internal/protocol/metainfo/banning"
 	"github.com/bitmagnet-io/bitmagnet/internal/protocol/metainfo/metainforequester"
+	"github.com/bitmagnet-io/bitmagnet/internal/protocol/tracker"
 	"github.com/prometheus/client_golang/prometheus"
 	boom "github.com/tylertreat/BoomFilters"
 	"go.uber.org/zap"
@@ -43,6 +44,8 @@ type crawler struct {
 	rescrapeThreshold            time.Duration
 	saveFilesThreshold           uint
 	savePieces                   bool
+	trackers                     []string
+	tracker_client               *tracker.Client
 	dao                          *dao.Query
 	// ignoreHashes is a thread-safe bloom filter that the crawler keeps in memory,
 	// containing every hash it has already encountered.
