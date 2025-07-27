@@ -50,6 +50,7 @@ func (c *crawler) doRequestMetaInfo(
 	ch := make(chan *metainforequester.Response)
 	remaining := len(peers)
 	blocked := false
+	closed := false
 	remaining_mutex := &sync.Mutex{}
 
 	for _, p := range peers {
@@ -58,7 +59,8 @@ func (c *crawler) doRequestMetaInfo(
 				remaining_mutex.Lock()
 				remaining--
 
-				if remaining <= 0 {
+				if remaining <= 0 && !closed {
+					closed = true
 					close(ch)
 				}
 
@@ -73,12 +75,13 @@ func (c *crawler) doRequestMetaInfo(
 
 			remaining_mutex.Lock()
 			defer remaining_mutex.Unlock()
-			defer close(ch)
 
-			if remaining == 0 {
+			if closed {
 				return
+			} else {
+				closed = true
+				defer close(ch)
 			}
-			remaining = 0
 
 			if banErr := c.banningChecker.Check(res.Info); banErr != nil {
 				blocked = true
