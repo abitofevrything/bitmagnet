@@ -15,11 +15,13 @@ import (
 )
 
 type Client struct {
-	stopped   chan struct{}
-	mutex     sync.Mutex
-	localAddr netip.AddrPort
-	socket    server.Socket
-	queries   map[int32]chan []byte
+	stopped              chan struct{}
+	localAddr            netip.AddrPort
+	socket               server.Socket
+	queries              map[int32]chan []byte
+	queries_mutex        sync.Mutex
+	connection_ids       map[netip.AddrPort]int64
+	connection_ids_mutex sync.Mutex
 }
 
 func New() (*Client, error) {
@@ -29,8 +31,9 @@ func New() (*Client, error) {
 			netip.IPv4Unspecified(),
 			3335,
 		),
-		socket:  server.NewSocket(),
-		queries: make(map[int32]chan []byte),
+		socket:         server.NewSocket(),
+		queries:        make(map[int32]chan []byte),
+		connection_ids: make(map[netip.AddrPort]int64),
 	}
 
 	if err := c.start(); err != nil {
@@ -100,9 +103,9 @@ func (c *Client) read(ctx context.Context) {
 			return
 		}
 
-		c.mutex.Lock()
+		c.queries_mutex.Lock()
 		ch, ok := c.queries[header.TransactionId]
-		c.mutex.Unlock()
+		c.queries_mutex.Unlock()
 
 		if ok {
 			ch <- buffer[:n]
@@ -152,65 +155,79 @@ type IpAndPort struct {
 }
 
 func (c *Client) GetPeers(ctx context.Context, tracker netip.AddrPort, infoHash protocol.ID) ([]netip.AddrPort, error) {
-	ctx, cancel := context.WithTimeout(ctx, time.Second*10)
+	ctx, cancel := context.WithTimeout(ctx, time.Second)
 
 	transaction_id := rand.Int32()
 
 	ch := make(chan []byte)
-	c.mutex.Lock()
+	c.queries_mutex.Lock()
 	c.queries[transaction_id] = ch
-	c.mutex.Unlock()
+	c.queries_mutex.Unlock()
 
 	defer func() {
-		c.mutex.Lock()
+		c.queries_mutex.Lock()
 		delete(c.queries, transaction_id)
-		c.mutex.Unlock()
+		c.queries_mutex.Unlock()
 
 		cancel()
 	}()
 
 	buf := &bytes.Buffer{}
-
-	connect_request := ConnectRequest{
-		ProtocolId:    0x41727101980,
-		Action:        0,
-		TransactionId: transaction_id,
-	}
-
-	if err := binary.Write(buf, binary.BigEndian, connect_request); err != nil {
-		return nil, err
-	}
-	c.socket.Send(tracker, buf.Bytes())
-
 	var resp []byte
 
-	select {
-	case <-ctx.Done():
-		return nil, ctx.Err()
-	case resp = <-ch:
-	}
+	var connection_id int64
+	c.connection_ids_mutex.Lock()
+	if cached_connection_id, ok := c.connection_ids[tracker]; !ok {
+		connect_request := ConnectRequest{
+			ProtocolId:    0x41727101980,
+			Action:        0,
+			TransactionId: transaction_id,
+		}
 
-	var connect_response ConnectResponse
-	if err := binary.Read(bytes.NewReader(resp), binary.BigEndian, &connect_response); err != nil {
-		return nil, err
-	}
+		if err := binary.Write(buf, binary.BigEndian, connect_request); err != nil {
+			c.connection_ids_mutex.Unlock()
+			return nil, err
+		}
+		c.socket.Send(tracker, buf.Bytes())
 
-	connection_id := connect_response.ConnectionId
+		select {
+		case <-ctx.Done():
+			c.connection_ids_mutex.Unlock()
+			return nil, ctx.Err()
+		case resp = <-ch:
+		}
+
+		var connect_response ConnectResponse
+		if err := binary.Read(bytes.NewReader(resp), binary.BigEndian, &connect_response); err != nil {
+			c.connection_ids_mutex.Unlock()
+			return nil, err
+		}
+
+		connection_id = connect_response.ConnectionId
+		c.connection_ids[tracker] = connection_id
+	} else {
+		connection_id = cached_connection_id
+	}
+	c.connection_ids_mutex.Unlock()
+
+	peer_id := protocol.RandomNodeID()
+	port := int16(rand.Int32() & 0xffff)
+	key := rand.Int32()
 
 	announce_request := AnnounceRequest{
 		ConnectionId:  connection_id,
 		Action:        1,
 		TransactionId: transaction_id,
 		InfoHash:      infoHash,
-		PeerId:        protocol.RandomNodeID(),
+		PeerId:        peer_id,
 		Downloaded:    0,
 		Left:          0,
 		Uploaded:      0,
-		Event:         0,
+		Event:         2, // started
 		IpAddress:     0,
-		Key:           rand.Int32(),
+		Key:           key,
 		NumWant:       -1,
-		Port:          0,
+		Port:          port,
 	}
 
 	buf.Reset()
@@ -224,6 +241,29 @@ func (c *Client) GetPeers(ctx context.Context, tracker netip.AddrPort, infoHash 
 		return nil, ctx.Err()
 	case resp = <-ch:
 	}
+
+	// Don't make the tracker register us as a peer.
+	denounce_request := AnnounceRequest{
+		ConnectionId:  connection_id,
+		Action:        1,
+		TransactionId: transaction_id,
+		InfoHash:      infoHash,
+		PeerId:        peer_id,
+		Downloaded:    0,
+		Left:          0,
+		Uploaded:      0,
+		Event:         3, // stopped
+		IpAddress:     0,
+		Key:           key,
+		NumWant:       -1,
+		Port:          port,
+	}
+
+	buf.Reset()
+	if err := binary.Write(buf, binary.BigEndian, denounce_request); err != nil {
+		return nil, err
+	}
+	c.socket.Send(tracker, buf.Bytes())
 
 	reader := bytes.NewReader(resp)
 	var announce_response AnnounceResponse

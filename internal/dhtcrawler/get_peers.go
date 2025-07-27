@@ -6,10 +6,12 @@ import (
 	"net"
 	"net/netip"
 	"net/url"
+	"sync"
 	"time"
 
 	"github.com/bitmagnet-io/bitmagnet/internal/protocol/dht/ktable"
 	"github.com/prometheus/client_golang/prometheus"
+	"golang.org/x/sync/semaphore"
 )
 
 func (c *crawler) runGetPeers(ctx context.Context) {
@@ -34,27 +36,42 @@ func (c *crawler) runGetPeers(ctx context.Context) {
 
 	_ = c.getPeers.Run(ctx, func(req nodeHasPeersForHash) {
 
+		tracker_peers_lock := &sync.Mutex{}
 		tracker_peers := make([]netip.AddrPort, 0)
+		trackers_semaphore := semaphore.NewWeighted(int64(len(trackers)))
+		trackers_semaphore.Acquire(ctx, int64(len(trackers)))
 
 		for _, tracker := range trackers {
-			// fmt.Printf("Requesting peers for %s from %s\n", req.infoHash, tracker)
+			go func() {
+				res, err := c.tracker_client.GetPeers(ctx, tracker, req.infoHash)
+				if err == nil {
+					tracker_peers_lock.Lock()
+					tracker_peers = append(tracker_peers, res...)
+					tracker_peers_lock.Unlock()
+				}
 
-			res, err := c.tracker_client.GetPeers(ctx, tracker, req.infoHash)
-			if err != nil {
-				fmt.Printf("error from tracker: %s\n", err)
+				trackers_semaphore.Release(1)
+			}()
+		}
+
+		var dht_peers []netip.AddrPort
+		dht_peers_lock := &sync.Mutex{}
+		dht_peers_lock.Lock()
+
+		go func() {
+			pfh, pfhErr := c.requestPeersForHash(ctx, req)
+			if pfhErr == nil {
+				dht_peers = pfh.peers
 			}
 
-			// fmt.Printf("Got %d peers from %s\n", len(res), tracker)
+			dht_peers_lock.Unlock()
+		}()
 
-			tracker_peers = append(tracker_peers, res...)
-		}
+		// Wait for all tracker responses & DHT peers query
+		trackers_semaphore.Acquire(ctx, int64(len(trackers)))
+		dht_peers_lock.Lock()
 
-		pfh, pfhErr := c.requestPeersForHash(ctx, req)
-		if pfhErr != nil {
-			return
-		}
-
-		peers := append(tracker_peers, pfh.peers...)
+		peers := append(tracker_peers, dht_peers...)
 
 		unique_peers := make([]netip.AddrPort, 0)
 		peer_map := make(map[netip.AddrPort]struct{})
@@ -69,8 +86,6 @@ func (c *crawler) runGetPeers(ctx context.Context) {
 		if len(unique_peers) == 0 {
 			return
 		}
-
-		fmt.Printf("Total unique peers for %s: %d (%d from DHT)\n", req.infoHash, len(unique_peers), len(pfh.peers))
 
 		hashPeers := make([]ktable.HashPeer, 0, len(unique_peers))
 
