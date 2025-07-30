@@ -172,7 +172,12 @@ func (c *crawler) adjustInfoHashLimit(ctx context.Context) {
 			currentLimit := c.processInfoHashLimit.limit()
 			newLimit := currentLimit
 			if c.processInfoHashLimit.isOverloaded() {
-				interval = 10 * time.Second
+				// Scale up more aggressively than we scale down, the purpose
+				// of adjusting this limit is to avoid network strain, not to
+				// actually limit the hash processing rate.
+				// If we are able to process more, we should do so as soon as
+				// possible.
+				interval = 20 * time.Second
 				newLimit *= 1.1
 			} else if !c.processInfoHashLimit.isSaturated() {
 				newLimit *= 0.99
