@@ -163,24 +163,17 @@ func (c *crawler) adjustInfoHashLimit(ctx context.Context) {
 	for {
 		c.processHashRate.Set(float64(c.processInfoHashLimit.limit()))
 
-		interval := time.Minute
-
 		select {
 		case <-ctx.Done():
 			return
-		case <-time.After(interval):
+		case <-time.After(time.Minute):
 			currentLimit := c.processInfoHashLimit.limit()
 			newLimit := currentLimit
-			if c.processInfoHashLimit.isOverloaded() {
-				// Scale up more aggressively than we scale down, the purpose
-				// of adjusting this limit is to avoid network strain, not to
-				// actually limit the hash processing rate.
-				// If we are able to process more, we should do so as soon as
-				// possible.
-				interval = 20 * time.Second
-				newLimit *= 1.1
-			} else if !c.processInfoHashLimit.isSaturated() {
+
+			if !c.processInfoHashLimit.isSaturated() {
 				newLimit *= 0.99
+			} else {
+				newLimit *= 1.01
 			}
 
 			newLimit = max(newLimit, rate.Limit(10))
