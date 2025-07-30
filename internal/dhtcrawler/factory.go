@@ -164,7 +164,7 @@ func New(params Params) Result {
 						savePieces:                   params.Config.SavePieces,
 						maxProcessInfoHashRate:       maxProcessHashRate,
 
-						processNodeLimit:     newLimiter(initialProcessHashRate),
+						processNodeLimit:     newLimiter(initialProcessHashRate / 5),
 						processInfoHashLimit: newLimiter(initialProcessHashRate),
 
 						recentlyProcessedNodes:      boom.NewStableBloomFilter(10_000_000, 2, 0.001),
