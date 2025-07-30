@@ -10,6 +10,7 @@ import (
 	"github.com/bitmagnet-io/bitmagnet/internal/model"
 	"github.com/bitmagnet-io/bitmagnet/internal/protocol"
 	"github.com/bitmagnet-io/bitmagnet/internal/protocol/dht/ktable"
+	"github.com/bitmagnet-io/bitmagnet/internal/protocol/dht/ktable/btree"
 )
 
 func (c *crawler) handleDiscoveredInfohashes(ctx context.Context) {
@@ -128,44 +129,64 @@ func (c *crawler) processInfohashes(ctx context.Context, reqs []nodeWithHash) {
 }
 
 func (c *crawler) requestMetaInfo(ctx context.Context, req nodeWithHash) {
-	peersRes, err := c.client.GetPeers(ctx, req.node.Addr(), req.infoHash)
-	if err != nil {
-		c.kTable.BatchCommand(ktable.DropAddr{
-			Addr:   req.node.Addr().Addr(),
-			Reason: fmt.Errorf("failed to get peers: %w", err),
-		})
+	infohash := req.infoHash
+	pendingNodes := []ktable.Node{req.node}
 
-		return
-	}
+	for len(pendingNodes) > 0 {
+		// Try the last currentNode first as it is the most recently obtained "close"
+		// node.
+		currentNode := pendingNodes[len(pendingNodes)-1]
+		pendingNodes = pendingNodes[:len(pendingNodes)-1]
 
-	c.kTable.BatchCommand(ktable.PutNode{
-		ID:      peersRes.ID,
-		Addr:    req.node.Addr(),
-		Options: []ktable.NodeOption{ktable.NodeResponded()},
-	})
-
-	for _, node := range peersRes.Nodes {
-		c.discoveredNodes <- ktable.NewNode(node.ID, node.Addr)
-	}
-
-	for _, p := range peersRes.Values {
-		res, err := c.metainfoRequester.Request(ctx, req.infoHash, p)
+		peersRes, err := c.client.GetPeers(ctx, currentNode.Addr(), req.infoHash)
 		if err != nil {
-			continue
-		}
+			c.kTable.BatchCommand(ktable.DropAddr{
+				Addr:   currentNode.Addr().Addr(),
+				Reason: fmt.Errorf("failed to get peers: %w", err),
+			})
 
-		if banErr := c.banningChecker.Check(res.Info); banErr != nil {
-			_ = c.blockingManager.Block(ctx, []protocol.ID{req.infoHash}, false)
 			return
 		}
 
-		c.pendingTorrentPersistsLock.Lock()
-		c.pendingTorrentPersists[req.infoHash] = make(chan struct{})
-		c.pendingTorrentPersistsLock.Unlock()
-		c.torrentsToPersist.In() <- hashWithMetaInfo{infoHash: req.infoHash, metaInfo: res.Info}
+		c.kTable.BatchCommand(ktable.PutNode{
+			ID:      peersRes.ID,
+			Addr:    currentNode.Addr(),
+			Options: []ktable.NodeOption{ktable.NodeResponded()},
+		})
 
-		c.scrape(ctx, req)
-		return
+		discoveredNodeDistance := btree.NodeID(infohash.Bytes()).MustXor(btree.NodeID(currentNode.ID().Bytes())).Bits()
+
+		for _, node := range peersRes.Nodes {
+			discoveredNode := ktable.NewNode(node.ID, node.Addr)
+			c.discoveredNodes <- discoveredNode
+
+			nodeDistance := btree.NodeID(infohash.Bytes()).MustXor(discoveredNode.ID().Bytes()).Bits()
+
+			// Only try nodes that are closer than the current node.
+			if discoveredNodeDistance.Cmp(nodeDistance) > 0 {
+				pendingNodes = append(pendingNodes, discoveredNode)
+			}
+		}
+
+		for _, p := range peersRes.Values {
+			res, err := c.metainfoRequester.Request(ctx, req.infoHash, p)
+			if err != nil {
+				continue
+			}
+
+			if banErr := c.banningChecker.Check(res.Info); banErr != nil {
+				_ = c.blockingManager.Block(ctx, []protocol.ID{req.infoHash}, false)
+				return
+			}
+
+			c.pendingTorrentPersistsLock.Lock()
+			c.pendingTorrentPersists[req.infoHash] = make(chan struct{})
+			c.pendingTorrentPersistsLock.Unlock()
+			c.torrentsToPersist.In() <- hashWithMetaInfo{infoHash: req.infoHash, metaInfo: res.Info}
+
+			c.scrape(ctx, req)
+			return
+		}
 	}
 }
 
