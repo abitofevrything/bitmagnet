@@ -51,7 +51,7 @@ func (b Bits) Cmp(other Bits) int {
 		return -1
 	}
 
-	if thisPos == len(b) {
+	if thisPos == len(b)+1 {
 		return 0
 	}
 
