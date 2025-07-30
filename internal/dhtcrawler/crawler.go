@@ -2,12 +2,11 @@ package dhtcrawler
 
 import (
 	"context"
-	"net/netip"
+	"net"
 	"sync"
 	"time"
 
 	"github.com/bitmagnet-io/bitmagnet/internal/blocking"
-	"github.com/bitmagnet-io/bitmagnet/internal/bloom"
 	"github.com/bitmagnet-io/bitmagnet/internal/concurrency"
 	"github.com/bitmagnet-io/bitmagnet/internal/database/dao"
 	"github.com/bitmagnet-io/bitmagnet/internal/protocol"
@@ -19,107 +18,171 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 	boom "github.com/tylertreat/BoomFilters"
 	"go.uber.org/zap"
+	"golang.org/x/time/rate"
 )
 
 type crawler struct {
-	kTable                       ktable.Table
-	client                       client.Client
-	metainfoRequester            metainforequester.Requester
-	banningChecker               banning.Checker
+	kTable            ktable.Table
+	client            client.Client
+	metainfoRequester metainforequester.Requester
+	banningChecker    banning.Checker
+	dao               *dao.Query
+	blockingManager   blocking.Manager
+
 	bootstrapNodes               []string
-	reseedBootstrapNodesInterval time.Duration
-	getOldestNodesInterval       time.Duration
-	oldPeerThreshold             time.Duration
-	discoveredNodes              concurrency.BatchingChannel[ktable.Node]
-	nodesForPing                 concurrency.BufferedConcurrentChannel[ktable.Node]
-	nodesForFindNode             concurrency.BufferedConcurrentChannel[ktable.Node]
-	nodesForSampleInfoHashes     concurrency.BufferedConcurrentChannel[ktable.Node]
-	infoHashTriage               concurrency.BatchingChannel[nodeHasPeersForHash]
-	getPeers                     concurrency.BufferedConcurrentChannel[nodeHasPeersForHash]
-	scrape                       concurrency.BufferedConcurrentChannel[nodeHasPeersForHash]
-	requestMetaInfo              concurrency.BufferedConcurrentChannel[infoHashWithPeers]
-	persistTorrents              concurrency.BatchingChannel[infoHashWithMetaInfo]
-	persistSources               concurrency.BatchingChannel[infoHashWithScrape]
 	rescrapeThreshold            time.Duration
+	reseedBootstrapNodesInterval time.Duration
 	saveFilesThreshold           uint
 	savePieces                   bool
-	dao                          *dao.Query
-	// ignoreHashes is a thread-safe bloom filter that the crawler keeps in memory,
-	// containing every hash it has already encountered.
-	// This avoids multiple attempts to crawl the same hash, and takes a lot of load off the database query
-	// that checks if a hash has already been indexed.
-	ignoreHashes    *ignoreHashes
-	blockingManager blocking.Manager
-	// soughtNodeID is a random node ID used as the target for find_node and sample_infohashes requests.
-	// It is rotated every 10 seconds.
-	soughtNodeID   *concurrency.AtomicValue[protocol.ID]
-	stopped        chan struct{}
-	persistedTotal *prometheus.CounterVec
-	logger         *zap.SugaredLogger
+	maxProcessInfoHashRate       int
+
+	processNodeLimit     limiter
+	processInfoHashLimit limiter
+
+	recentlyProcessedNodes      *boom.StableBloomFilter
+	recentlyProcessedInfoHashes *boom.StableBloomFilter
+
+	discoveredNodes      chan ktable.Node
+	discoveredInfoHashes chan nodeWithHash
+	torrentsToPersist    concurrency.BatchingChannel[hashWithMetaInfo]
+	scrapesToPersist     concurrency.BatchingChannel[hashWithScrape]
+
+	pendingTorrentPersistsLock *sync.Mutex
+	pendingTorrentPersists     map[protocol.ID]chan struct{}
+
+	soughtNodeID *concurrency.AtomicValue[protocol.ID]
+
+	logger *zap.SugaredLogger
+
+	totalDiscoveredNodes  prometheus.Counter
+	totalProcessedNodes   prometheus.Counter
+	totalDiscoveredHashes prometheus.Counter
+	totalProcessedHashes  prometheus.Counter
+	totalPersisted        *prometheus.CounterVec
+	processNodeRate       prometheus.Gauge
+	processHashRate       prometheus.Gauge
 }
 
-func (c *crawler) start() {
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	// start the various pipeline workers
-	go c.rotateSoughtNodeID(ctx)
-	go c.runDiscoveredNodes(ctx)
-	go c.runPing(ctx)
-	go c.runFindNode(ctx)
-	go c.getNodesForFindNode(ctx)
-	go c.runSampleInfoHashes(ctx)
-	go c.getNodesForSampleInfoHashes(ctx)
-	go c.runInfoHashTriage(ctx)
-	go c.runGetPeers(ctx)
-	go c.runRequestMetaInfo(ctx)
-	go c.runScrape(ctx)
-	go c.reseedBootstrapNodes(ctx)
-	go c.runPersistTorrents(ctx)
-	go c.runPersistSources(ctx)
-	go c.getOldNodes(ctx)
-	<-c.stopped
-}
-
-type nodeHasPeersForHash struct {
+type nodeWithHash struct {
+	node     ktable.Node
 	infoHash protocol.ID
-	node     netip.AddrPort
 }
 
-type infoHashWithMetaInfo struct {
-	nodeHasPeersForHash
+type hashWithMetaInfo struct {
+	infoHash protocol.ID
 	metaInfo metainfo.Info
 }
 
-type infoHashWithPeers struct {
-	nodeHasPeersForHash
-	peers []netip.AddrPort
+type hashWithScrape struct {
+	infoHash protocol.ID
+	seeders  uint32
+	leechers uint32
 }
 
-type infoHashWithScrape struct {
-	nodeHasPeersForHash
-	bfsd bloom.Filter
-	bfpe bloom.Filter
+func (c *crawler) start(ctx context.Context) {
+	go c.handleDiscoveredNodes(ctx)
+	go c.handleDiscoveredInfohashes(ctx)
+	go c.rotateSoughtNodeID(ctx)
+	go c.reseedBootstrapNodes(ctx)
+	go c.runPersistTorrents(ctx)
+	go c.runPersistScrapes(ctx)
+	go c.adjustNodeLimit(ctx)
+	go c.adjustInfoHashLimit(ctx)
 }
 
-type ignoreHashes struct {
-	mutex sync.Mutex
-	bloom *boom.StableBloomFilter
-}
+func (c *crawler) reseedBootstrapNodes(ctx context.Context) {
+	for {
+		for _, node := range c.bootstrapNodes {
+			addr, err := net.ResolveUDPAddr("udp", node)
+			if err != nil {
+				c.logger.Warnf("failed to resolve bootstrap node address: %s", err)
+				continue
+			}
 
-func (i *ignoreHashes) testAndAdd(id protocol.ID) bool {
-	i.mutex.Lock()
-	defer i.mutex.Unlock()
+			if !c.processNodeLimit.isSaturated() {
+				// Don't discover the bootstrap nodes seeing as most of them do
+				// not like sample_infohashes requests.
+				c.runFindNode(ctx, ktable.NewNode(ktable.ID{}, addr.AddrPort()))
+			}
+		}
 
-	return i.bloom.TestAndAdd(id[:])
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(c.reseedBootstrapNodesInterval):
+			continue
+		}
+	}
 }
 
 func (c *crawler) rotateSoughtNodeID(ctx context.Context) {
 	for {
+		c.soughtNodeID.Set(protocol.RandomNodeID())
+
 		select {
 		case <-ctx.Done():
 			return
 		case <-time.After(10 * time.Second):
-			c.soughtNodeID.Set(protocol.RandomNodeID())
+		}
+	}
+}
+
+func (c *crawler) adjustNodeLimit(ctx context.Context) {
+	for {
+		c.processNodeRate.Set(float64(c.processNodeLimit.limit()))
+
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(time.Second * 10):
+			currentLimit := c.processNodeLimit.limit()
+			newLimit := currentLimit
+			if c.processInfoHashLimit.isOverloaded() {
+				newLimit *= 0.9
+			} else if !c.processInfoHashLimit.isSaturated() {
+				newLimit *= 1.1
+			}
+
+			newLimit = max(newLimit, rate.Limit(10))
+			// Each node should provide on average more than one infohash.
+			// If we try to scale past the infohash processing limit, something
+			// is going wrong (e.g no internet causing 100% failure rate on
+			// processNode).
+			// Add this limit to prevent the process node limit from scaling to
+			// infinity.
+			newLimit = min(newLimit, c.processInfoHashLimit.limit())
+
+			if newLimit != currentLimit {
+				c.processNodeLimit.setLimit(newLimit)
+			}
+		}
+	}
+}
+
+func (c *crawler) adjustInfoHashLimit(ctx context.Context) {
+	for {
+		c.processHashRate.Set(float64(c.processInfoHashLimit.limit()))
+
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(time.Minute):
+			currentLimit := c.processInfoHashLimit.limit()
+			newLimit := currentLimit
+			if c.processInfoHashLimit.isOverloaded() {
+				newLimit *= 1.01
+			} else if !c.processInfoHashLimit.isSaturated() {
+				newLimit *= 0.99
+			}
+
+			newLimit = max(newLimit, rate.Limit(10))
+			if c.maxProcessInfoHashRate > 0 {
+				newLimit = min(newLimit, rate.Limit(c.maxProcessInfoHashRate))
+			}
+
+			if newLimit != currentLimit {
+				c.processInfoHashLimit.setLimit(newLimit)
+			}
 		}
 	}
 }

@@ -5,11 +5,10 @@ import (
 )
 
 type Config struct {
-	// ScalingFactor is a rough proxy for resource usage of the crawler; concurrency and buffer size of the various
-	// pipeline channels are multiplied by this value. Diminishing returns may result from exceeding the
-	// default value of 10. Since the software has not been tested on a wide variety of hardware and network
-	// conditions; your mileage may vary here...
-	ScalingFactor                uint
+	// Set to 0 to have no limit.
+	MaxProcessHashRate int
+	// Set to 0 to initially use the max rate.
+	InitialProcessHashRate       int
 	BootstrapNodes               []string
 	ReseedBootstrapNodesInterval time.Duration
 	// SaveFilesThreshold specifies a maximum number of files in a torrent before file information is discarded.
@@ -26,7 +25,8 @@ type Config struct {
 
 func NewDefaultConfig() Config {
 	return Config{
-		ScalingFactor:                10,
+		MaxProcessHashRate:           100,
+		InitialProcessHashRate:       0,
 		BootstrapNodes:               defaultBootstrapNodes,
 		ReseedBootstrapNodesInterval: time.Minute,
 		SaveFilesThreshold:           100,

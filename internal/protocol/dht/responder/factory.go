@@ -3,7 +3,6 @@ package responder
 import (
 	"time"
 
-	"github.com/bitmagnet-io/bitmagnet/internal/concurrency"
 	"github.com/bitmagnet-io/bitmagnet/internal/protocol"
 	"github.com/bitmagnet-io/bitmagnet/internal/protocol/dht/ktable"
 	"github.com/prometheus/client_golang/prometheus"
@@ -16,7 +15,7 @@ import (
 type Params struct {
 	fx.In
 	KTable          ktable.Table
-	DiscoveredNodes concurrency.BatchingChannel[ktable.Node] `name:"dht_discovered_nodes"`
+	DiscoveredNodes chan ktable.Node `name:"dht_discovered_nodes"`
 	Logger          *zap.SugaredLogger
 }
 
@@ -53,7 +52,7 @@ func New(p Params) Result {
 					return zapcore.NewSamplerWithOptions(core, time.Minute, 10, 0)
 				})).Named(subsystem),
 			},
-			discoveredNodes: p.DiscoveredNodes.In(),
+			discoveredNodes: p.DiscoveredNodes,
 		},
 		QueryDuration:     collector.queryDuration,
 		QuerySuccessTotal: collector.querySuccessTotal,

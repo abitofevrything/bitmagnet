@@ -14,15 +14,14 @@ import (
 	"gorm.io/gorm/clause"
 )
 
-// runPersistTorrents waits on the persistTorrents channel, and persists torrents to the database in batches.
-// After persisting each batch it will publish a message to the classifier,
-// and forward the hash on the scrape channel to attempt finding the seeders/leechers.
+const classifyBatchSize = 100
+
 func (c *crawler) runPersistTorrents(ctx context.Context) {
 	for {
 		select {
 		case <-ctx.Done():
 			return
-		case is := <-c.persistTorrents.Out():
+		case is := <-c.torrentsToPersist.Out():
 			torrentsToPersist := make([]*model.Torrent, 0, len(is))
 
 			var torrentFilesToPersist []*model.TorrentFile
@@ -33,7 +32,7 @@ func (c *crawler) runPersistTorrents(ctx context.Context) {
 
 			var queueJobsToPersist []*model.QueueJob
 
-			hashMap := make(map[protocol.ID]infoHashWithMetaInfo, len(is))
+			hashMap := make(map[protocol.ID]hashWithMetaInfo, len(is))
 
 			var hashesToClassify []protocol.ID
 
@@ -131,17 +130,16 @@ func (c *crawler) runPersistTorrents(ctx context.Context) {
 			}); persistErr != nil {
 				c.logger.Errorf("error persisting torrents: %s", persistErr)
 			} else {
-				c.persistedTotal.With(prometheus.Labels{"entity": "Torrent"}).Add(float64(len(torrentsToPersist)))
-				c.logger.Debugw("persisted torrents", "count", len(torrentsToPersist))
+				c.totalPersisted.With(prometheus.Labels{"entity": "Torrent"}).Add(float64(len(torrentsToPersist)))
 
-				for _, i := range hashMap {
-					select {
-					case <-ctx.Done():
-						return
-					case c.scrape.In() <- i.nodeHasPeersForHash:
-						continue
+				c.pendingTorrentPersistsLock.Lock()
+				for h := range hashMap {
+					if ch, ok := c.pendingTorrentPersists[h]; ok {
+						close(ch)
+						delete(c.pendingTorrentPersists, h)
 					}
 				}
+				c.pendingTorrentPersistsLock.Unlock()
 			}
 		}
 	}
@@ -211,22 +209,23 @@ func createTorrentModel(
 	}, nil
 }
 
-const classifyBatchSize = 100
-
-// runPersistSources waits on the persistSources channel for scraped torrents, and persists sources
-// (which includes discovery date, seeders and leechers) to the database in batches.
-func (c *crawler) runPersistSources(ctx context.Context) {
+func (c *crawler) runPersistScrapes(ctx context.Context) {
 	for {
 		select {
 		case <-ctx.Done():
 			return
-		case scrapes := <-c.persistSources.Out():
+		case scrapes := <-c.scrapesToPersist.Out():
 			srcs := make([]*model.TorrentsTorrentSource, 0, len(scrapes))
 
 			hashSet := make(map[protocol.ID]struct{}, len(scrapes))
 			for _, s := range scrapes {
 				if _, ok := hashSet[s.infoHash]; ok {
 					continue
+				}
+
+				if ch, ok := c.pendingTorrentPersists[s.infoHash]; ok {
+					// Block this batch until the torrent model for infoHash has been inserted.
+					<-ch
 				}
 
 				hashSet[s.infoHash] = struct{}{}
@@ -261,23 +260,19 @@ func (c *crawler) runPersistSources(ctx context.Context) {
 			).CreateInBatches(srcs, 100); persistErr != nil {
 				c.logger.Errorf("error persisting torrent sources: %s", persistErr.Error())
 			} else {
-				c.persistedTotal.With(prometheus.Labels{"entity": "TorrentsTorrentSource"}).Add(float64(len(srcs)))
-				c.logger.Debugw("persisted torrent sources", "count", len(srcs))
+				c.totalPersisted.With(prometheus.Labels{"entity": "TorrentsTorrentSource"}).Add(float64(len(srcs)))
 			}
 		}
 	}
 }
 
 func createTorrentSourceModel(
-	result infoHashWithScrape,
+	result hashWithScrape,
 ) (model.TorrentsTorrentSource, error) {
-	seeders := model.NewNullUint(uint(result.bfsd.ApproximatedSize()))
-	leechers := model.NewNullUint(uint(result.bfpe.ApproximatedSize()))
-
 	return model.TorrentsTorrentSource{
 		Source:   "dht",
 		InfoHash: result.infoHash,
-		Seeders:  seeders,
-		Leechers: leechers,
+		Seeders:  model.NewNullUint(uint(result.seeders)),
+		Leechers: model.NewNullUint(uint(result.leechers)),
 	}, nil
 }

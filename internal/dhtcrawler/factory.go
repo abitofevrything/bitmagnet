@@ -2,12 +2,13 @@ package dhtcrawler
 
 import (
 	"context"
+	"errors"
+	"sync"
 	"time"
 
 	"github.com/bitmagnet-io/bitmagnet/internal/blocking"
 	"github.com/bitmagnet-io/bitmagnet/internal/concurrency"
 	"github.com/bitmagnet-io/bitmagnet/internal/database/dao"
-	"github.com/bitmagnet-io/bitmagnet/internal/database/search"
 	"github.com/bitmagnet-io/bitmagnet/internal/lazy"
 	"github.com/bitmagnet-io/bitmagnet/internal/protocol"
 	"github.com/bitmagnet-io/bitmagnet/internal/protocol/dht/client"
@@ -28,10 +29,8 @@ type Params struct {
 	Client            lazy.Lazy[client.Client]
 	MetainfoRequester metainforequester.Requester
 	BanningChecker    banning.Checker `name:"metainfo_banning_checker"`
-	Search            lazy.Lazy[search.Search]
 	Dao               lazy.Lazy[*dao.Query]
 	BlockingManager   lazy.Lazy[blocking.Manager]
-	DiscoveredNodes   concurrency.BatchingChannel[ktable.Node] `name:"dht_discovered_nodes"`
 	Logger            *zap.SugaredLogger
 }
 
@@ -41,33 +40,95 @@ type Result struct {
 
 	DhtCrawlerActive *concurrency.AtomicValue[bool] `name:"dht_crawler_active"`
 
-	PersistedTotal prometheus.Collector `group:"prometheus_collectors"`
+	TotalDiscoveredNodes  prometheus.Collector `group:"prometheus_collectors"`
+	TotalProcessedNodes   prometheus.Collector `group:"prometheus_collectors"`
+	TotalDiscoveredHashes prometheus.Collector `group:"prometheus_collectors"`
+	TotalProcessedHashes  prometheus.Collector `group:"prometheus_collectors"`
+	TotalPersisted        prometheus.Collector `group:"prometheus_collectors"`
+	ProcessNodeRate       prometheus.Collector `group:"prometheus_collectors"`
+	ProcessHashRate       prometheus.Collector `group:"prometheus_collectors"`
 }
 
+const (
+	databaseBatchSize     = 1000
+	databaseBatchInterval = 20 * time.Second
+	namespace             = "bitmagnet"
+	subsystem             = "dht_crawler"
+)
+
 func New(params Params) Result {
+	var cancel func()
 	active := &concurrency.AtomicValue[bool]{}
 
-	var c crawler
+	totalDiscoveredNodes := prometheus.NewCounter(prometheus.CounterOpts{
+		Namespace: namespace,
+		Subsystem: subsystem,
+		Name:      "discovered_nodes_total",
+		Help:      "The total number of nodes discovered by the crawler.",
+	})
 
-	persistedTotal := prometheus.NewCounterVec(prometheus.CounterOpts{
-		Namespace: "bitmagnet",
-		Subsystem: "dht_crawler",
+	totalProcessedNodes := prometheus.NewCounter(prometheus.CounterOpts{
+		Namespace: namespace,
+		Subsystem: subsystem,
+		Name:      "processed_nodes_total",
+		Help:      "The total number of nodes processed by the crawler.",
+	})
+
+	totalDiscoveredHashes := prometheus.NewCounter(prometheus.CounterOpts{
+		Namespace: namespace,
+		Subsystem: subsystem,
+		Name:      "discovered_hashes_total",
+		Help:      "The total number of infohashes discovered by the crawler.",
+	})
+
+	totalProcessedHashes := prometheus.NewCounter(prometheus.CounterOpts{
+		Namespace: namespace,
+		Subsystem: subsystem,
+		Name:      "processed_hashes_total",
+		Help:      "The total number of infohashes processed by the crawler.",
+	})
+
+	totalPersisted := prometheus.NewCounterVec(prometheus.CounterOpts{
+		Namespace: namespace,
+		Subsystem: subsystem,
 		Name:      "persisted_total",
 		Help:      "A counter of persisted database entities.",
 	}, []string{"entity"})
 
+	processNodeRate := prometheus.NewGauge(prometheus.GaugeOpts{
+		Namespace: namespace,
+		Subsystem: subsystem,
+		Name:      "process_node_rate",
+		Help:      "The rate (per second) at which the DHT crawler tries to process nodes",
+	})
+
+	processHashRate := prometheus.NewGauge(prometheus.GaugeOpts{
+		Namespace: namespace,
+		Subsystem: subsystem,
+		Name:      "process_hash_rate",
+		Help:      "The rate (per second) at which the DHT crawler tries to process infohashes",
+	})
+
 	return Result{
+		DhtCrawlerActive:      active,
+		TotalDiscoveredNodes:  totalDiscoveredNodes,
+		TotalProcessedNodes:   totalProcessedNodes,
+		TotalDiscoveredHashes: totalDiscoveredHashes,
+		TotalProcessedHashes:  totalProcessedHashes,
+		TotalPersisted:        totalPersisted,
+		ProcessNodeRate:       processNodeRate,
+		ProcessHashRate:       processHashRate,
 		Worker: worker.NewWorker(
 			"dht_crawler",
 			fx.Hook{
-				OnStart: func(context.Context) error {
+				OnStart: func(ctx context.Context) error {
 					active.Set(true)
-					scalingFactor := int(params.Config.ScalingFactor)
-					cl, err := params.Client.Get()
+
+					client, err := params.Client.Get()
 					if err != nil {
 						return err
 					}
-					query, err := params.Dao.Get()
+					dao, err := params.Dao.Get()
 					if err != nil {
 						return err
 					}
@@ -75,74 +136,86 @@ func New(params Params) Result {
 					if err != nil {
 						return err
 					}
-					c = crawler{
-						kTable:                       params.KTable,
-						client:                       cl,
-						metainfoRequester:            params.MetainfoRequester,
-						banningChecker:               params.BanningChecker,
-						bootstrapNodes:               params.Config.BootstrapNodes,
-						reseedBootstrapNodesInterval: time.Minute * 10,
-						getOldestNodesInterval:       time.Second * 10,
-						oldPeerThreshold:             time.Minute * 15,
-						discoveredNodes:              params.DiscoveredNodes,
-						nodesForPing: concurrency.NewBufferedConcurrentChannel[ktable.Node](
-							scalingFactor, scalingFactor),
-						nodesForFindNode: concurrency.NewBufferedConcurrentChannel[ktable.Node](
-							10*scalingFactor, 10*scalingFactor),
-						nodesForSampleInfoHashes: concurrency.NewBufferedConcurrentChannel[ktable.Node](
-							10*scalingFactor,
-							10*scalingFactor,
-						),
-						infoHashTriage: concurrency.NewBatchingChannel[nodeHasPeersForHash](
-							10*scalingFactor, 1000, 20*time.Second),
-						getPeers: concurrency.NewBufferedConcurrentChannel[nodeHasPeersForHash](
-							10*scalingFactor, 20*scalingFactor),
-						scrape: concurrency.NewBufferedConcurrentChannel[nodeHasPeersForHash](
-							10*scalingFactor, 20*scalingFactor),
-						requestMetaInfo: concurrency.NewBufferedConcurrentChannel[infoHashWithPeers](
-							10*scalingFactor,
-							40*scalingFactor,
-						),
-						persistTorrents: concurrency.NewBatchingChannel[infoHashWithMetaInfo](
-							1000,
-							1000,
-							time.Minute,
-						),
-						persistSources: concurrency.NewBatchingChannel[infoHashWithScrape](
-							1000,
-							1000,
-							time.Minute,
-						),
-						saveFilesThreshold: params.Config.SaveFilesThreshold,
-						savePieces:         params.Config.SavePieces,
-						rescrapeThreshold:  params.Config.RescrapeThreshold,
-						dao:                query,
-						ignoreHashes: &ignoreHashes{
-							bloom: boom.NewStableBloomFilter(10_000_000, 2, 0.001),
-						},
-						blockingManager: blockingManager,
-						soughtNodeID:    &concurrency.AtomicValue[protocol.ID]{},
-						stopped:         make(chan struct{}),
-						persistedTotal:  persistedTotal,
-						logger:          params.Logger.Named("dht_crawler"),
-					}
-					c.soughtNodeID.Set(protocol.RandomNodeID())
 
-					// todo: Fix!
-					//nolint:contextcheck
-					go c.start()
+					maxProcessHashRate := params.Config.MaxProcessHashRate
+					initialProcessHashRate := params.Config.InitialProcessHashRate
+					if initialProcessHashRate == 0 {
+						if maxProcessHashRate == 0 {
+							return errors.New("no initial hash processing rate was specified for an infinite maximum rate")
+						}
+
+						initialProcessHashRate = maxProcessHashRate
+					}
+
+					ctx, cancel = context.WithCancel(ctx)
+
+					c := crawler{
+						kTable:            params.KTable,
+						client:            client,
+						metainfoRequester: params.MetainfoRequester,
+						banningChecker:    params.BanningChecker,
+						dao:               dao,
+						blockingManager:   blockingManager,
+
+						bootstrapNodes:               params.Config.BootstrapNodes,
+						rescrapeThreshold:            params.Config.RescrapeThreshold,
+						reseedBootstrapNodesInterval: params.Config.ReseedBootstrapNodesInterval,
+						saveFilesThreshold:           params.Config.SaveFilesThreshold,
+						savePieces:                   params.Config.SavePieces,
+						maxProcessInfoHashRate:       maxProcessHashRate,
+
+						processNodeLimit:     newLimiter(initialProcessHashRate),
+						processInfoHashLimit: newLimiter(initialProcessHashRate),
+
+						recentlyProcessedNodes:      boom.NewStableBloomFilter(10_000_000, 2, 0.001),
+						recentlyProcessedInfoHashes: boom.NewStableBloomFilter(10_000_000, 2, 0.001),
+
+						discoveredNodes:      make(chan ktable.Node),
+						discoveredInfoHashes: make(chan nodeWithHash),
+						torrentsToPersist:    concurrency.NewBatchingChannel[hashWithMetaInfo](100, databaseBatchSize, databaseBatchInterval),
+						scrapesToPersist:     concurrency.NewBatchingChannel[hashWithScrape](100, databaseBatchSize, databaseBatchInterval),
+
+						pendingTorrentPersistsLock: &sync.Mutex{},
+						pendingTorrentPersists:     make(map[protocol.ID]chan struct{}),
+
+						soughtNodeID: &concurrency.AtomicValue[protocol.ID]{},
+
+						logger: params.Logger,
+
+						totalDiscoveredNodes:  totalDiscoveredNodes,
+						totalProcessedNodes:   totalProcessedNodes,
+						totalDiscoveredHashes: totalDiscoveredHashes,
+						totalProcessedHashes:  totalProcessedHashes,
+						totalPersisted:        totalPersisted,
+						processNodeRate:       processNodeRate,
+						processHashRate:       processHashRate,
+					}
+
+					go c.start(ctx)
 					return nil
 				},
 				OnStop: func(context.Context) error {
 					active.Set(false)
-					if c.stopped != nil {
-						close(c.stopped)
-					}
+					cancel()
 					return nil
 				},
 			},
 		),
-		PersistedTotal:   persistedTotal,
-		DhtCrawlerActive: active,
+	}
+}
+
+type DiscoveredNodesParams struct {
+	fx.In
+	Config Config
+}
+
+type DiscoveredNodesResult struct {
+	fx.Out
+	DiscoveredNodes chan ktable.Node `name:"dht_discovered_nodes"`
+}
+
+func NewDiscoveredNodes(params DiscoveredNodesParams) DiscoveredNodesResult {
+	return DiscoveredNodesResult{
+		DiscoveredNodes: make(chan ktable.Node, 100),
 	}
 }
