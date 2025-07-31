@@ -46,6 +46,8 @@ type Result struct {
 	TotalPersisted        prometheus.Collector `group:"prometheus_collectors"`
 	ProcessNodeRate       prometheus.Collector `group:"prometheus_collectors"`
 	ProcessHashRate       prometheus.Collector `group:"prometheus_collectors"`
+	RecentNodeRatio       prometheus.Collector `group:"prometheus_collectors"`
+	NodeRatio             prometheus.Collector `group:"prometheus_collectors"`
 }
 
 const (
@@ -108,6 +110,20 @@ func New(params Params) Result {
 		Help:      "The rate (per second) at which the DHT crawler tries to process infohashes",
 	})
 
+	recentNodeRatio := prometheus.NewGauge(prometheus.GaugeOpts{
+		Namespace: namespace,
+		Subsystem: subsystem,
+		Name:      "recent_node_ratio",
+		Help:      "The average number of infohashes returned per processed node (recent nodes only)",
+	})
+
+	nodeRatio := prometheus.NewGauge(prometheus.GaugeOpts{
+		Namespace: namespace,
+		Subsystem: subsystem,
+		Name:      "node_ratio",
+		Help:      "The average number of infohashes returned per processed node (long running average)",
+	})
+
 	return Result{
 		DhtCrawlerActive:      active,
 		TotalDiscoveredNodes:  totalDiscoveredNodes,
@@ -117,6 +133,8 @@ func New(params Params) Result {
 		TotalPersisted:        totalPersisted,
 		ProcessNodeRate:       processNodeRate,
 		ProcessHashRate:       processHashRate,
+		RecentNodeRatio:       recentNodeRatio,
+		NodeRatio:             nodeRatio,
 		Worker: worker.NewWorker(
 			"dht_crawler",
 			fx.Hook{
@@ -174,17 +192,21 @@ func New(params Params) Result {
 						torrentsToPersist:    concurrency.NewBatchingChannel[hashWithMetaInfo](100, databaseBatchSize, databaseBatchInterval),
 						scrapesToPersist:     concurrency.NewBatchingChannel[hashWithScrape](100, databaseBatchSize, databaseBatchInterval),
 
+						nodeRatio: newNodeRatio(1000, 1_000_000),
+
 						soughtNodeID: &concurrency.AtomicValue[protocol.ID]{},
 
 						logger: params.Logger,
 
-						totalDiscoveredNodes:  totalDiscoveredNodes,
-						totalProcessedNodes:   totalProcessedNodes,
-						totalDiscoveredHashes: totalDiscoveredHashes,
-						totalProcessedHashes:  totalProcessedHashes,
-						totalPersisted:        totalPersisted,
-						processNodeRate:       processNodeRate,
-						processHashRate:       processHashRate,
+						totalDiscoveredNodes:     totalDiscoveredNodes,
+						totalProcessedNodes:      totalProcessedNodes,
+						totalDiscoveredHashes:    totalDiscoveredHashes,
+						totalProcessedHashes:     totalProcessedHashes,
+						totalPersisted:           totalPersisted,
+						processNodeRate:          processNodeRate,
+						processHashRate:          processHashRate,
+						recentNodeRatioCollector: recentNodeRatio,
+						nodeRatioCollector:       nodeRatio,
 					}
 
 					go c.start(ctx)

@@ -46,17 +46,21 @@ type crawler struct {
 	torrentsToPersist    concurrency.BatchingChannel[hashWithMetaInfo]
 	scrapesToPersist     concurrency.BatchingChannel[hashWithScrape]
 
+	nodeRatio *nodeRatio
+
 	soughtNodeID *concurrency.AtomicValue[protocol.ID]
 
 	logger *zap.SugaredLogger
 
-	totalDiscoveredNodes  prometheus.Counter
-	totalProcessedNodes   prometheus.Counter
-	totalDiscoveredHashes prometheus.Counter
-	totalProcessedHashes  *prometheus.CounterVec
-	totalPersisted        *prometheus.CounterVec
-	processNodeRate       prometheus.Gauge
-	processHashRate       prometheus.Gauge
+	totalDiscoveredNodes     prometheus.Counter
+	totalProcessedNodes      prometheus.Counter
+	totalDiscoveredHashes    prometheus.Counter
+	totalProcessedHashes     *prometheus.CounterVec
+	totalPersisted           *prometheus.CounterVec
+	processNodeRate          prometheus.Gauge
+	processHashRate          prometheus.Gauge
+	recentNodeRatioCollector prometheus.Gauge
+	nodeRatioCollector       prometheus.Gauge
 }
 
 type nodeWithHash struct {
@@ -127,6 +131,8 @@ func (c *crawler) rotateSoughtNodeID(ctx context.Context) {
 func (c *crawler) adjustNodeLimit(ctx context.Context) {
 	for {
 		c.processNodeRate.Set(float64(c.processNodeLimit.limit()))
+		c.recentNodeRatioCollector.Set(c.nodeRatio.recentRatio())
+		c.nodeRatioCollector.Set(c.nodeRatio.ratio())
 
 		select {
 		case <-ctx.Done():
@@ -134,7 +140,8 @@ func (c *crawler) adjustNodeLimit(ctx context.Context) {
 		case <-time.After(time.Second * 10):
 			currentLimit := c.processNodeLimit.limit()
 			newLimit := currentLimit
-			if c.processInfoHashLimit.isOverloaded() {
+
+			if c.processInfoHashLimit.isOverloaded() || c.nodeRatio.recentRatio() < c.nodeRatio.ratio()*0.75 {
 				newLimit *= 0.9
 			} else if !c.processInfoHashLimit.isSaturated() {
 				newLimit *= 1.1

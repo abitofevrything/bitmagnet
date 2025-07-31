@@ -37,6 +37,8 @@ func (c *crawler) processNode(ctx context.Context, node ktable.Node) {
 		return
 	}
 
+	c.nodeRatio.addNode()
+
 	res, err := c.client.SampleInfoHashes(ctx, node.Addr(), c.soughtNodeID.Get())
 	if err != nil {
 		// Only attempt to find_node if the node did respond and we are short of nodes to process.
@@ -60,6 +62,8 @@ func (c *crawler) processNode(ctx context.Context, node ktable.Node) {
 			infoHash: s,
 		})
 	}
+
+	c.nodeRatio.addHashes(len(discoveredHashes))
 
 	interval := res.Interval
 	// most nodes request a 6 hour backoff time(!)
