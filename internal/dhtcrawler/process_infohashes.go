@@ -29,10 +29,6 @@ func (c *crawler) handleDiscoveredInfohashes(ctx context.Context) {
 				continue
 			}
 
-			if !c.processInfoHashLimit.allow() {
-				continue
-			}
-
 			batchedChannel.In() <- req
 		}
 	}
@@ -113,14 +109,21 @@ func (c *crawler) processInfohashes(ctx context.Context, reqs []nodeWithHash) {
 			(t.FilesStatus != model.FilesStatusSingle && !t.FilesCount.Valid) ||
 			(t.FilesStatus == model.FilesStatusOverThreshold && t.FilesCount.Uint <= c.saveFilesThreshold) {
 
+			if !c.processInfoHashLimit.allow() {
+				continue
+			}
+
 			c.totalProcessedHashes.With(prometheus.Labels{"result": "request_metainfo"}).Inc()
 			go c.requestMetaInfo(ctx, r)
 		} else if (!t.Seeders.Valid || !t.Leechers.Valid) ||
 			t.UpdatedAt.Before(time.Now().Add(-c.rescrapeThreshold)) {
+
+			if !c.processInfoHashLimit.allow() {
+				continue
+			}
+
 			c.totalProcessedHashes.With(prometheus.Labels{"result": "scrape"}).Inc()
 			go c.scrape(ctx, r)
-		} else {
-			c.totalProcessedHashes.With(prometheus.Labels{"result": "skipped"}).Inc()
 		}
 
 		select {
