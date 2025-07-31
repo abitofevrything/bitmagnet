@@ -136,7 +136,7 @@ func (c *crawler) processInfohashes(ctx context.Context, reqs []nodeWithHash) {
 }
 
 func (c *crawler) requestMetaInfo(ctx context.Context, req nodeWithHash) {
-	peersRes, err := c.client.GetPeers(ctx, req.node.Addr(), req.infoHash)
+	peersRes, err := c.client.GetPeersWithScrape(ctx, req.node.Addr(), req.infoHash)
 	if err != nil {
 		c.kTable.BatchCommand(ktable.DropAddr{
 			Addr:   req.node.Addr().Addr(),
@@ -167,18 +167,27 @@ func (c *crawler) requestMetaInfo(ctx context.Context, req nodeWithHash) {
 			return
 		}
 
-		c.pendingTorrentPersistsLock.Lock()
-		c.pendingTorrentPersists[req.infoHash] = make(chan struct{})
-		c.pendingTorrentPersistsLock.Unlock()
-		c.torrentsToPersist.In() <- hashWithMetaInfo{infoHash: req.infoHash, metaInfo: res.Info}
+		var scrape *hashWithScrape
+		if peersRes.BfPeers != nil && peersRes.BfSeeders != nil {
+			scrape = &hashWithScrape{
+				infoHash: req.infoHash,
+				seeders:  peersRes.BfSeeders.ApproximatedSize(),
+				leechers: peersRes.BfPeers.ApproximatedSize(),
+			}
+		}
 
-		c.scrape(ctx, req)
+		c.torrentsToPersist.In() <- hashWithMetaInfo{
+			infoHash: req.infoHash,
+			metaInfo: res.Info,
+			scrape:   scrape,
+		}
+
 		return
 	}
 }
 
 func (c *crawler) scrape(ctx context.Context, req nodeWithHash) {
-	res, err := c.client.GetPeersScrape(ctx, req.node.Addr(), req.infoHash)
+	res, err := c.client.GetPeersWithScrape(ctx, req.node.Addr(), req.infoHash)
 	if err != nil {
 		c.kTable.BatchCommand(ktable.DropAddr{
 			Addr:   req.node.Addr().Addr(),
@@ -196,6 +205,10 @@ func (c *crawler) scrape(ctx context.Context, req nodeWithHash) {
 
 	for _, node := range res.Nodes {
 		c.discoveredNodes <- ktable.NewNode(node.ID, node.Addr)
+	}
+
+	if res.BfPeers == nil || res.BfSeeders == nil {
+		return
 	}
 
 	c.scrapesToPersist.In() <- hashWithScrape{

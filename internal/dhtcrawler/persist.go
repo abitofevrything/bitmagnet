@@ -8,7 +8,6 @@ import (
 	"github.com/bitmagnet-io/bitmagnet/internal/model"
 	"github.com/bitmagnet-io/bitmagnet/internal/processor"
 	"github.com/bitmagnet-io/bitmagnet/internal/protocol"
-	"github.com/bitmagnet-io/bitmagnet/internal/protocol/metainfo"
 	"github.com/prometheus/client_golang/prometheus"
 	"gorm.io/gen"
 	"gorm.io/gorm/clause"
@@ -62,8 +61,7 @@ func (c *crawler) runPersistTorrents(ctx context.Context) {
 
 				hashMap[i.infoHash] = i
 
-				if t, err := createTorrentModel(
-					i.infoHash, i.metaInfo, c.savePieces, c.saveFilesThreshold); err != nil {
+				if t, err := createTorrentModel(i, c.savePieces, c.saveFilesThreshold); err != nil {
 					c.logger.Errorf("error creating torrent model: %s", err.Error())
 				} else {
 					for _, f := range t.Files {
@@ -131,26 +129,19 @@ func (c *crawler) runPersistTorrents(ctx context.Context) {
 				c.logger.Errorf("error persisting torrents: %s", persistErr)
 			} else {
 				c.totalPersisted.With(prometheus.Labels{"entity": "Torrent"}).Add(float64(len(torrentsToPersist)))
-
-				c.pendingTorrentPersistsLock.Lock()
-				for h := range hashMap {
-					if ch, ok := c.pendingTorrentPersists[h]; ok {
-						close(ch)
-						delete(c.pendingTorrentPersists, h)
-					}
-				}
-				c.pendingTorrentPersistsLock.Unlock()
 			}
 		}
 	}
 }
 
 func createTorrentModel(
-	hash protocol.ID,
-	info metainfo.Info,
+	req hashWithMetaInfo,
 	savePieces bool,
 	saveFilesThreshold uint,
 ) (model.Torrent, error) {
+	hash := req.infoHash
+	info := req.metaInfo
+
 	name := info.BestName()
 
 	private := false
@@ -191,6 +182,13 @@ func createTorrentModel(
 		}
 	}
 
+	var seeders model.NullUint
+	var leechers model.NullUint
+	if req.scrape != nil {
+		seeders = model.NewNullUint(uint(req.scrape.seeders))
+		leechers = model.NewNullUint(uint(req.scrape.leechers))
+	}
+
 	return model.Torrent{
 		InfoHash:    hash,
 		Name:        name,
@@ -204,6 +202,8 @@ func createTorrentModel(
 			{
 				Source:   "dht",
 				InfoHash: hash,
+				Seeders:  seeders,
+				Leechers: leechers,
 			},
 		},
 	}, nil
@@ -221,11 +221,6 @@ func (c *crawler) runPersistScrapes(ctx context.Context) {
 			for _, s := range scrapes {
 				if _, ok := hashSet[s.infoHash]; ok {
 					continue
-				}
-
-				if ch, ok := c.pendingTorrentPersists[s.infoHash]; ok {
-					// Block this batch until the torrent model for infoHash has been inserted.
-					<-ch
 				}
 
 				hashSet[s.infoHash] = struct{}{}

@@ -3,7 +3,6 @@ package dhtcrawler
 import (
 	"context"
 	"net"
-	"sync"
 	"time"
 
 	"github.com/bitmagnet-io/bitmagnet/internal/blocking"
@@ -47,9 +46,6 @@ type crawler struct {
 	torrentsToPersist    concurrency.BatchingChannel[hashWithMetaInfo]
 	scrapesToPersist     concurrency.BatchingChannel[hashWithScrape]
 
-	pendingTorrentPersistsLock *sync.Mutex
-	pendingTorrentPersists     map[protocol.ID]chan struct{}
-
 	soughtNodeID *concurrency.AtomicValue[protocol.ID]
 
 	logger *zap.SugaredLogger
@@ -71,6 +67,7 @@ type nodeWithHash struct {
 type hashWithMetaInfo struct {
 	infoHash protocol.ID
 	metaInfo metainfo.Info
+	scrape   *hashWithScrape
 }
 
 type hashWithScrape struct {

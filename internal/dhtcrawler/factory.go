@@ -3,7 +3,6 @@ package dhtcrawler
 import (
 	"context"
 	"errors"
-	"sync"
 	"time"
 
 	"github.com/bitmagnet-io/bitmagnet/internal/blocking"
@@ -174,9 +173,6 @@ func New(params Params) Result {
 						discoveredInfoHashes: make(chan nodeWithHash),
 						torrentsToPersist:    concurrency.NewBatchingChannel[hashWithMetaInfo](100, databaseBatchSize, databaseBatchInterval),
 						scrapesToPersist:     concurrency.NewBatchingChannel[hashWithScrape](100, databaseBatchSize, databaseBatchInterval),
-
-						pendingTorrentPersistsLock: &sync.Mutex{},
-						pendingTorrentPersists:     make(map[protocol.ID]chan struct{}),
 
 						soughtNodeID: &concurrency.AtomicValue[protocol.ID]{},
 

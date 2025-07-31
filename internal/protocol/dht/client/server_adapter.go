@@ -2,12 +2,12 @@ package client
 
 import (
 	"context"
-	"errors"
 	"net/netip"
 
 	"github.com/bitmagnet-io/bitmagnet/internal/protocol"
 	"github.com/bitmagnet-io/bitmagnet/internal/protocol/dht"
 	"github.com/bitmagnet-io/bitmagnet/internal/protocol/dht/server"
+	"github.com/bits-and-blooms/bloom/v3"
 )
 
 type serverAdapter struct {
@@ -40,24 +40,7 @@ func (a serverAdapter) FindNode(
 	}, nil
 }
 
-func (a serverAdapter) GetPeers(
-	ctx context.Context,
-	addr netip.AddrPort,
-	infoHash protocol.ID,
-) (GetPeersResult, error) {
-	res, err := a.server.Query(ctx, addr, dht.QGetPeers, dht.MsgArgs{ID: a.nodeID, InfoHash: infoHash})
-	if err != nil {
-		return GetPeersResult{}, err
-	}
-
-	return GetPeersResult{
-		ID:     res.Msg.R.ID,
-		Values: extractValues(res.Msg),
-		Nodes:  extractNodes(res.Msg),
-	}, nil
-}
-
-func (a serverAdapter) GetPeersScrape(
+func (a serverAdapter) GetPeersWithScrape(
 	ctx context.Context,
 	addr netip.AddrPort,
 	infoHash protocol.ID,
@@ -67,16 +50,22 @@ func (a serverAdapter) GetPeersScrape(
 		return GetPeersScrapeResult{}, err
 	}
 
-	if res.Msg.R.BFpe == nil || res.Msg.R.BFsd == nil {
-		return GetPeersScrapeResult{}, errors.New("missing bloom filter in scrape response")
+	var bfSeeders *bloom.BloomFilter
+	var bfPeers *bloom.BloomFilter
+
+	if res.Msg.R.BFpe != nil {
+		bfSeeders = res.Msg.R.BFpe.ToBloomFilter()
+	}
+	if res.Msg.R.BFsd != nil {
+		bfPeers = res.Msg.R.BFsd.ToBloomFilter()
 	}
 
 	return GetPeersScrapeResult{
 		ID:        res.Msg.R.ID,
 		Values:    extractValues(res.Msg),
 		Nodes:     extractNodes(res.Msg),
-		BfPeers:   *res.Msg.R.BFpe.ToBloomFilter(),
-		BfSeeders: *res.Msg.R.BFsd.ToBloomFilter(),
+		BfPeers:   bfPeers,
+		BfSeeders: bfSeeders,
 	}, nil
 }
 
