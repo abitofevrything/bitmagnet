@@ -124,6 +124,8 @@ func (c *crawler) processInfohashes(ctx context.Context, reqs []nodeWithHash) {
 
 			c.totalProcessedHashes.With(prometheus.Labels{"result": "scrape"}).Inc()
 			go c.scrape(ctx, r)
+		} else {
+			c.totalProcessedHashes.With(prometheus.Labels{"result": "skipped"}).Inc()
 		}
 
 		select {
