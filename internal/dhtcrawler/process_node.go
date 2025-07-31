@@ -43,6 +43,15 @@ func (c *crawler) processNode(ctx context.Context, node ktable.Node) {
 	if err != nil {
 		// Only attempt to find_node if the node did respond and we are short of nodes to process.
 		if err, ok := err.(dht.Error); ok && !c.processNodeLimit.isSaturated() && err.Code == dht.ErrorCodeMethodUnknown {
+			c.kTable.BatchCommand(ktable.PutNode{
+				ID:   node.ID(),
+				Addr: node.Addr(),
+				Options: []ktable.NodeOption{
+					ktable.NodeResponded(),
+					ktable.NodeBep51Support(false),
+				},
+			})
+
 			c.runFindNode(ctx, node)
 		} else {
 			c.kTable.BatchCommand(ktable.DropNode{
