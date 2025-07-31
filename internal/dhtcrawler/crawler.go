@@ -141,8 +141,12 @@ func (c *crawler) adjustNodeLimit(ctx context.Context) {
 			currentLimit := c.processNodeLimit.limit()
 			newLimit := currentLimit
 
-			if c.processInfoHashLimit.isOverloaded() || c.nodeRatio.recentRatio() < c.nodeRatio.ratio()*0.75 {
+			if c.nodeRatio.recentRatio() < c.nodeRatio.ratio()*0.75 {
+				// Most likely network overload causing increased failure rates
+				// in processNode. Scale down.
 				newLimit *= 0.9
+			} else if c.processInfoHashLimit.isOverloaded() {
+				newLimit *= 0.99
 			} else if !c.processInfoHashLimit.isSaturated() {
 				newLimit *= 1.1
 			}
