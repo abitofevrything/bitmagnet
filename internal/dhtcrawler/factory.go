@@ -81,12 +81,12 @@ func New(params Params) Result {
 		Help:      "The total number of infohashes discovered by the crawler.",
 	})
 
-	totalProcessedHashes := prometheus.NewCounter(prometheus.CounterOpts{
+	totalProcessedHashes := prometheus.NewCounterVec(prometheus.CounterOpts{
 		Namespace: namespace,
 		Subsystem: subsystem,
 		Name:      "processed_hashes_total",
 		Help:      "The total number of infohashes processed by the crawler.",
-	})
+	}, []string{"result"})
 
 	totalPersisted := prometheus.NewCounterVec(prometheus.CounterOpts{
 		Namespace: namespace,

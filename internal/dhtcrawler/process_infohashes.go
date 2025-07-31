@@ -10,6 +10,7 @@ import (
 	"github.com/bitmagnet-io/bitmagnet/internal/model"
 	"github.com/bitmagnet-io/bitmagnet/internal/protocol"
 	"github.com/bitmagnet-io/bitmagnet/internal/protocol/dht/ktable"
+	"github.com/prometheus/client_golang/prometheus"
 )
 
 func (c *crawler) handleDiscoveredInfohashes(ctx context.Context) {
@@ -31,8 +32,6 @@ func (c *crawler) handleDiscoveredInfohashes(ctx context.Context) {
 			if !c.processInfoHashLimit.allow() {
 				continue
 			}
-
-			c.totalProcessedHashes.Inc()
 
 			batchedChannel.In() <- req
 		}
@@ -66,6 +65,8 @@ func (c *crawler) processInfohashes(ctx context.Context, reqs []nodeWithHash) {
 		c.logger.Errorf("failed to filter infohashes: %s", filterErr.Error())
 		return
 	}
+
+	c.totalProcessedHashes.With(prometheus.Labels{"result": "filtered"}).Add(float64(len(allHashes) - len(filteredHashes)))
 
 	if len(filteredHashes) == 0 {
 		return
@@ -112,10 +113,14 @@ func (c *crawler) processInfohashes(ctx context.Context, reqs []nodeWithHash) {
 			(t.FilesStatus != model.FilesStatusSingle && !t.FilesCount.Valid) ||
 			(t.FilesStatus == model.FilesStatusOverThreshold && t.FilesCount.Uint <= c.saveFilesThreshold) {
 
+			c.totalProcessedHashes.With(prometheus.Labels{"result": "request_metainfo"}).Inc()
 			go c.requestMetaInfo(ctx, r)
 		} else if (!t.Seeders.Valid || !t.Leechers.Valid) ||
 			t.UpdatedAt.Before(time.Now().Add(-c.rescrapeThreshold)) {
+			c.totalProcessedHashes.With(prometheus.Labels{"result": "scrape"}).Inc()
 			go c.scrape(ctx, r)
+		} else {
+			c.totalProcessedHashes.With(prometheus.Labels{"result": "skipped"}).Inc()
 		}
 
 		select {

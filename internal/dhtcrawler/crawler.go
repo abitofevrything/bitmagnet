@@ -57,7 +57,7 @@ type crawler struct {
 	totalDiscoveredNodes  prometheus.Counter
 	totalProcessedNodes   prometheus.Counter
 	totalDiscoveredHashes prometheus.Counter
-	totalProcessedHashes  prometheus.Counter
+	totalProcessedHashes  *prometheus.CounterVec
 	totalPersisted        *prometheus.CounterVec
 	processNodeRate       prometheus.Gauge
 	processHashRate       prometheus.Gauge
