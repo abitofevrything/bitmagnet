@@ -192,8 +192,6 @@ func New(params Params) Result {
 						torrentsToPersist:    concurrency.NewBatchingChannel[hashWithMetaInfo](100, databaseBatchSize, databaseBatchInterval),
 						scrapesToPersist:     concurrency.NewBatchingChannel[hashWithScrape](100, databaseBatchSize, databaseBatchInterval),
 
-						nodeRatio: newNodeRatio(1000, 10_000_000),
-
 						soughtNodeID: &concurrency.AtomicValue[protocol.ID]{},
 
 						logger: params.Logger,
