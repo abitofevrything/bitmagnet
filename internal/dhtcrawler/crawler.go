@@ -265,7 +265,7 @@ func (c *crawler) findOptimalHashLimit(ctx context.Context) rate.Limit {
 				return 0
 			case <-nodesLimitAdjusted:
 				break adjustNodes
-			default:
+			case <-time.After(time.Second):
 				if checkOverload() {
 					setProcessLimit(10)
 					return 0
@@ -284,7 +284,7 @@ func (c *crawler) findOptimalHashLimit(ctx context.Context) rate.Limit {
 			case <-testEnded:
 				c.logger.Infof("Trying %f: %d in 10 minutes", limit, c.obtainedMetaInfoCounter)
 				return c.obtainedMetaInfoCounter
-			default:
+			case <-time.After(time.Second):
 				if checkOverload() {
 					setProcessLimit(10)
 					return 0
