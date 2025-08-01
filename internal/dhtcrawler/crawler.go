@@ -212,10 +212,18 @@ func (c *crawler) findOptimalHashLimit(ctx context.Context) rate.Limit {
 
 	setProcessLimit(10)
 
+	select {
+	case <-ctx.Done():
+		return 0
+	case <-time.After(time.Second * 10):
+	}
+
+	baseLatency := rate.InfDuration
+
 	measureLatency := func() time.Duration {
 		for range 3 {
 			start := time.Now()
-			conn, err := net.DialTimeout("tcp", "example.com", time.Second)
+			conn, err := net.DialTimeout("tcp", "example.com", baseLatency*5)
 			if err != nil {
 				continue
 			}
@@ -229,10 +237,16 @@ func (c *crawler) findOptimalHashLimit(ctx context.Context) rate.Limit {
 		return rate.InfDuration
 	}
 
-	baseLatency := measureLatency()
+	baseLatency = measureLatency()
+
+	c.logger.Infof("Base latency is %.2f", baseLatency.Seconds())
 
 	checkOverload := func() bool {
-		if measureLatency() > baseLatency*3 {
+		latency := measureLatency()
+
+		c.logger.Infof("Current latency is %.2f", latency.Seconds())
+
+		if latency > baseLatency*3 {
 			c.logger.Infof("Overload!!")
 			return true
 		}
@@ -251,7 +265,7 @@ func (c *crawler) findOptimalHashLimit(ctx context.Context) rate.Limit {
 				return 0
 			case <-nodesLimitAdjusted:
 				break adjustNodes
-			case <-time.After(time.Second):
+			default:
 				if checkOverload() {
 					setProcessLimit(10)
 					return 0
@@ -270,7 +284,7 @@ func (c *crawler) findOptimalHashLimit(ctx context.Context) rate.Limit {
 			case <-testEnded:
 				c.logger.Infof("Trying %f: %d in 10 minutes", limit, c.obtainedMetaInfoCounter)
 				return c.obtainedMetaInfoCounter
-			case <-time.After(time.Second):
+			default:
 				if checkOverload() {
 					setProcessLimit(10)
 					return 0
