@@ -204,10 +204,8 @@ func (c *crawler) adjustInfoHashLimit(ctx context.Context) {
 
 func (c *crawler) findOptimalHashLimit(ctx context.Context) rate.Limit {
 	setProcessLimit := func(limit rate.Limit) {
-		previousLimit := c.processInfoHashLimit.limit()
-
 		c.processInfoHashLimit.setLimit(limit)
-		c.processNodeLimit.setLimit(c.processNodeLimit.limit() * (limit / previousLimit))
+		c.processNodeLimit.setLimit(c.processNodeLimit.limit() / 4)
 
 		c.processHashRate.Set(float64(limit))
 
