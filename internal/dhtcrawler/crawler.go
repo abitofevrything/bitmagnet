@@ -205,77 +205,114 @@ func (c *crawler) adjustInfoHashLimit(ctx context.Context) {
 func (c *crawler) findOptimalHashLimit(ctx context.Context) rate.Limit {
 	setProcessLimit := func(limit rate.Limit) {
 		c.processInfoHashLimit.setLimit(limit)
-		c.processNodeLimit.setLimit(c.processNodeLimit.limit() / 4)
+		c.processNodeLimit.setLimit(limit / 4)
 
 		c.processHashRate.Set(float64(limit))
-
-		// Give time for processNodeLimit to adjust if needed
-		select {
-		case <-time.After(time.Minute):
-		case <-ctx.Done():
-		}
 	}
 
-	baseRate := rate.Limit(1)
-	rateCount := uint64(0)
+	setProcessLimit(10)
 
-	for {
-		currentRate := baseRate * 10
-		setProcessLimit(currentRate)
+	measureLatency := func() time.Duration {
+		for range 3 {
+			start := time.Now()
+			conn, err := net.DialTimeout("tcp", "example.com", time.Second)
+			if err != nil {
+				continue
+			}
+			delay := time.Since(start)
+
+			conn.Close()
+
+			return delay
+		}
+
+		return rate.InfDuration
+	}
+
+	baseLatency := measureLatency()
+
+	checkOverload := func() bool {
+		if measureLatency() > baseLatency*3 {
+			c.logger.Infof("Overload!!")
+			return true
+		}
+
+		return false
+	}
+
+	testLimit := func(limit rate.Limit) uint64 {
+		setProcessLimit(limit)
+
+		nodesLimitAdjusted := time.After(time.Minute)
+	adjustNodes:
+		for {
+			select {
+			case <-ctx.Done():
+				return 0
+			case <-nodesLimitAdjusted:
+				break adjustNodes
+			case <-time.After(time.Second):
+				if checkOverload() {
+					setProcessLimit(10)
+					return 0
+				}
+			}
+		}
 
 		c.obtainedMetaInfoCounter = 0
 
-		select {
-		case <-ctx.Done():
-			return baseRate
-		case <-time.After(time.Minute * 10):
+		testEnded := time.After(time.Minute * 10)
+
+		for {
+			select {
+			case <-ctx.Done():
+				return 0
+			case <-testEnded:
+				c.logger.Infof("Trying %f: %d in 10 minutes", limit, c.obtainedMetaInfoCounter)
+				return c.obtainedMetaInfoCounter
+			case <-time.After(time.Second):
+				if checkOverload() {
+					setProcessLimit(10)
+					return 0
+				}
+			}
 		}
+	}
 
-		c.logger.Infof("Trying %f: %d in 10 minutes", currentRate, c.obtainedMetaInfoCounter)
+	baseLimit := rate.Limit(1)
+	rateCount := uint64(0)
 
-		if c.obtainedMetaInfoCounter > rateCount {
-			baseRate = currentRate
-			rateCount = c.obtainedMetaInfoCounter
+	for {
+		currentLimit := baseLimit * 10
+		count := testLimit(currentLimit)
+
+		if count >= rateCount {
+			baseLimit = currentLimit
+			rateCount = count
 		} else {
 			break
 		}
 	}
 
-	// Give time for processNodeLimit to spool back down as it likely got very
-	// high when overloading the network.
-	select {
-	case <-ctx.Done():
-		return baseRate
-	case <-time.After(time.Minute * 10):
-	}
-
-	for increment := baseRate; increment > 5; increment /= 10 {
-		maxRate := baseRate
+	for increment := baseLimit; increment > 5; increment /= 10 {
+		maxLimit := baseLimit
 		maxCount := uint64(0)
 
-		for i := range 10 {
-			currentRate := baseRate + increment*rate.Limit(i)
+		for i := -9; i < 10; i++ {
+			currentLimit := baseLimit + increment*rate.Limit(i)
+			count := testLimit(currentLimit)
 
-			setProcessLimit(currentRate)
-
-			c.obtainedMetaInfoCounter = 0
-
-			select {
-			case <-ctx.Done():
-				return baseRate
-			case <-time.After(time.Minute * 10):
-			}
-
-			c.logger.Infof("Trying %f: %d in 10 minutes", currentRate, c.obtainedMetaInfoCounter)
-
-			if c.obtainedMetaInfoCounter > maxCount {
-				maxRate = currentRate
-				maxCount = c.obtainedMetaInfoCounter
+			if count > maxCount {
+				maxLimit = currentLimit
+				maxCount = count
+			} else if count == 0 {
+				// We overloaded. Don't try higher.
+				break
 			}
 		}
 
-		baseRate = maxRate
+		baseLimit = maxLimit
 	}
 
-	return baseRate
+	return baseLimit
 }
