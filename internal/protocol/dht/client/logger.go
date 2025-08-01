@@ -31,13 +31,21 @@ func (l clientLogger) FindNode(ctx context.Context, addr netip.AddrPort, target 
 	return res, err
 }
 
-func (l clientLogger) GetPeersWithScrape(
+func (l clientLogger) GetPeers(ctx context.Context, addr netip.AddrPort, infoHash dht.ID) (GetPeersResult, error) {
+	start := time.Now()
+	res, err := l.client.GetPeers(ctx, addr, infoHash)
+	l.log(dht.QGetPeers, addr, start, err)
+
+	return res, err
+}
+
+func (l clientLogger) GetPeersScrape(
 	ctx context.Context,
 	addr netip.AddrPort,
 	infoHash dht.ID,
 ) (GetPeersScrapeResult, error) {
 	start := time.Now()
-	res, err := l.client.GetPeersWithScrape(ctx, addr, infoHash)
+	res, err := l.client.GetPeersScrape(ctx, addr, infoHash)
 	l.log(dht.QGetPeers+":scrape", addr, start, err)
 
 	return res, err

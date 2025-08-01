@@ -40,7 +40,24 @@ func (a serverAdapter) FindNode(
 	}, nil
 }
 
-func (a serverAdapter) GetPeersWithScrape(
+func (a serverAdapter) GetPeers(
+	ctx context.Context,
+	addr netip.AddrPort,
+	infoHash protocol.ID,
+) (GetPeersResult, error) {
+	res, err := a.server.Query(ctx, addr, dht.QGetPeers, dht.MsgArgs{ID: a.nodeID, InfoHash: infoHash})
+	if err != nil {
+		return GetPeersResult{}, err
+	}
+
+	return GetPeersResult{
+		ID:     res.Msg.R.ID,
+		Values: extractValues(res.Msg),
+		Nodes:  extractNodes(res.Msg),
+	}, nil
+}
+
+func (a serverAdapter) GetPeersScrape(
 	ctx context.Context,
 	addr netip.AddrPort,
 	infoHash protocol.ID,

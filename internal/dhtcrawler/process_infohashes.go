@@ -138,7 +138,7 @@ func (c *crawler) processInfohashes(ctx context.Context, reqs []nodeWithHash) {
 }
 
 func (c *crawler) requestMetaInfo(ctx context.Context, req nodeWithHash) {
-	peersRes, err := c.client.GetPeersWithScrape(ctx, req.node.Addr(), req.infoHash)
+	peersRes, err := c.client.GetPeersScrape(ctx, req.node.Addr(), req.infoHash)
 	if err != nil {
 		c.kTable.BatchCommand(ktable.DropAddr{
 			Addr:   req.node.Addr().Addr(),
@@ -154,11 +154,29 @@ func (c *crawler) requestMetaInfo(ctx context.Context, req nodeWithHash) {
 		Options: []ktable.NodeOption{ktable.NodeResponded()},
 	})
 
+	peers := peersRes.Values
+	// Some nodes don't return peers when doing a DHT scrape
+	// (see for example https://github.com/arvidn/libtorrent/issues/8005)
+	// Try again without scrape.
+	if len(peers) == 0 {
+		newPeersRes, err := c.client.GetPeers(ctx, req.node.Addr(), req.infoHash)
+		if err != nil {
+			c.kTable.BatchCommand(ktable.DropAddr{
+				Addr:   req.node.Addr().Addr(),
+				Reason: fmt.Errorf("failed to get peers: %w", err),
+			})
+
+			return
+		}
+
+		peers = newPeersRes.Values
+	}
+
 	for _, node := range peersRes.Nodes {
 		c.discoveredNodes <- ktable.NewNode(node.ID, node.Addr)
 	}
 
-	for _, p := range peersRes.Values {
+	for _, p := range peers {
 		res, err := c.metainfoRequester.Request(ctx, req.infoHash, p)
 		if err != nil {
 			continue
@@ -189,7 +207,7 @@ func (c *crawler) requestMetaInfo(ctx context.Context, req nodeWithHash) {
 }
 
 func (c *crawler) scrape(ctx context.Context, req nodeWithHash) {
-	res, err := c.client.GetPeersWithScrape(ctx, req.node.Addr(), req.infoHash)
+	res, err := c.client.GetPeersScrape(ctx, req.node.Addr(), req.infoHash)
 	if err != nil {
 		c.kTable.BatchCommand(ktable.DropAddr{
 			Addr:   req.node.Addr().Addr(),
