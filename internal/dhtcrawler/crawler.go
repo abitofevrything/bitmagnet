@@ -50,6 +50,8 @@ type crawler struct {
 
 	logger *zap.SugaredLogger
 
+	obtainedMetaInfoCounter uint64
+
 	totalDiscoveredNodes     prometheus.Counter
 	totalProcessedNodes      prometheus.Counter
 	totalDiscoveredHashes    prometheus.Counter
@@ -161,29 +163,121 @@ func (c *crawler) adjustNodeLimit(ctx context.Context) {
 
 func (c *crawler) adjustInfoHashLimit(ctx context.Context) {
 	for {
-		c.processHashRate.Set(float64(c.processInfoHashLimit.limit()))
+		maxRate := rate.Limit(c.maxProcessInfoHashRate)
+		targetRate := rate.Limit(0)
+		if maxRate == 0 {
+			maxRate := c.findOptimalHashLimit(ctx)
+			targetRate = maxRate
+		}
 
-		select {
-		case <-ctx.Done():
-			return
-		case <-time.After(time.Minute):
-			currentLimit := c.processInfoHashLimit.limit()
-			newLimit := currentLimit
+	adjustLoop:
+		for {
+			c.processHashRate.Set(float64(c.processInfoHashLimit.limit()))
 
-			if !c.processInfoHashLimit.isSaturated() {
-				newLimit *= 0.99
-			} else {
-				newLimit *= 1.01
-			}
+			select {
+			case <-ctx.Done():
+				return
+			case <-time.After(time.Minute):
+				currentLimit := c.processInfoHashLimit.limit()
+				newLimit := currentLimit
 
-			newLimit = max(newLimit, rate.Limit(10))
-			if c.maxProcessInfoHashRate > 0 {
-				newLimit = min(newLimit, rate.Limit(c.maxProcessInfoHashRate))
-			}
+				if !c.processInfoHashLimit.isSaturated() {
+					newLimit *= 0.99
+				} else {
+					newLimit *= 1.01
+				}
 
-			if newLimit != currentLimit {
-				c.processInfoHashLimit.setLimit(newLimit)
+				newLimit = max(newLimit, rate.Limit(10))
+				newLimit = min(newLimit, maxRate)
+
+				if newLimit != currentLimit {
+					c.processInfoHashLimit.setLimit(newLimit)
+				}
+
+				if targetRate != 0 && newLimit < 0.9*targetRate {
+					break adjustLoop
+				}
 			}
 		}
 	}
+}
+
+func (c *crawler) findOptimalHashLimit(ctx context.Context) rate.Limit {
+	setProcessLimit := func(limit rate.Limit) {
+		previousLimit := c.processInfoHashLimit.limit()
+
+		c.processInfoHashLimit.setLimit(limit)
+		c.processNodeLimit.setLimit(c.processNodeLimit.limit() * (limit / previousLimit))
+
+		c.processHashRate.Set(float64(limit))
+
+		// Give time for processNodeLimit to adjust if needed
+		select {
+		case <-time.After(time.Minute):
+		case <-ctx.Done():
+		}
+	}
+
+	baseRate := rate.Limit(1)
+	rateCount := uint64(0)
+
+	for {
+		currentRate := baseRate * 10
+		setProcessLimit(currentRate)
+
+		c.obtainedMetaInfoCounter = 0
+
+		select {
+		case <-ctx.Done():
+			return baseRate
+		case <-time.After(time.Minute * 10):
+		}
+
+		c.logger.Infof("Trying %f: %d in 10 minutes", currentRate, c.obtainedMetaInfoCounter)
+
+		if c.obtainedMetaInfoCounter > rateCount {
+			baseRate = currentRate
+			rateCount = c.obtainedMetaInfoCounter
+		} else {
+			break
+		}
+	}
+
+	// Give time for processNodeLimit to spool back down as it likely got very
+	// high when overloading the network.
+	select {
+	case <-ctx.Done():
+		return baseRate
+	case <-time.After(time.Minute * 10):
+	}
+
+	for increment := baseRate; increment > 5; increment /= 10 {
+		maxRate := baseRate
+		maxCount := uint64(0)
+
+		for i := range 10 {
+			currentRate := baseRate + increment*rate.Limit(i)
+
+			setProcessLimit(currentRate)
+
+			c.obtainedMetaInfoCounter = 0
+
+			select {
+			case <-ctx.Done():
+				return baseRate
+			case <-time.After(time.Minute * 10):
+			}
+
+			c.logger.Infof("Trying %f: %d in 10 minutes", currentRate, c.obtainedMetaInfoCounter)
+
+			if c.obtainedMetaInfoCounter > maxCount {
+				maxRate = currentRate
+				maxCount = c.obtainedMetaInfoCounter
+			}
+		}
+
+		baseRate = maxRate
+	}
+
+	return baseRate
 }

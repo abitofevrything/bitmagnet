@@ -182,6 +182,8 @@ func (c *crawler) requestMetaInfo(ctx context.Context, req nodeWithHash) {
 			continue
 		}
 
+		c.obtainedMetaInfoCounter++
+
 		if banErr := c.banningChecker.Check(res.Info); banErr != nil {
 			_ = c.blockingManager.Block(ctx, []protocol.ID{req.infoHash}, false)
 			return
