@@ -223,7 +223,7 @@ func (c *crawler) findOptimalHashLimit(ctx context.Context) rate.Limit {
 	measureLatency := func() time.Duration {
 		for range 3 {
 			start := time.Now()
-			conn, err := net.DialTimeout("tcp", "example.com", baseLatency*5)
+			conn, err := net.DialTimeout("tcp", "example.com:80", baseLatency*5)
 			if err != nil {
 				continue
 			}
