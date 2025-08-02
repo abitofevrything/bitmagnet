@@ -25,7 +25,7 @@ func (c *crawler) handleDiscoveredInfohashes(ctx context.Context) {
 		case req := <-c.discoveredInfoHashes:
 			c.totalDiscoveredHashes.Inc()
 
-			if c.recentlyProcessedInfoHashes.TestAndAdd(req.infoHash.Bytes()) && c.processInfoHashLimit.isSaturated() {
+			if c.recentlyProcessedInfoHashes.TestAndAdd(req.infoHash.Bytes()) {
 				continue
 			}
 
@@ -109,7 +109,7 @@ func (c *crawler) processInfohashes(ctx context.Context, reqs []nodeWithHash) {
 			(t.FilesStatus != model.FilesStatusSingle && !t.FilesCount.Valid) ||
 			(t.FilesStatus == model.FilesStatusOverThreshold && t.FilesCount.Uint <= c.saveFilesThreshold) {
 
-			if !c.processInfoHashLimit.allow() {
+			if !c.requestMetaInfoLimit.allow() {
 				continue
 			}
 
@@ -117,10 +117,6 @@ func (c *crawler) processInfohashes(ctx context.Context, reqs []nodeWithHash) {
 			go c.requestMetaInfo(ctx, r)
 		} else if (!t.Seeders.Valid || !t.Leechers.Valid) ||
 			t.UpdatedAt.Before(time.Now().Add(-c.rescrapeThreshold)) {
-
-			if !c.processInfoHashLimit.allow() {
-				continue
-			}
 
 			c.totalProcessedHashes.With(prometheus.Labels{"result": "scrape"}).Inc()
 			go c.scrape(ctx, r)
@@ -181,8 +177,6 @@ func (c *crawler) requestMetaInfo(ctx context.Context, req nodeWithHash) {
 		if err != nil {
 			continue
 		}
-
-		c.obtainedMetaInfoCounter++
 
 		if banErr := c.banningChecker.Check(res.Info); banErr != nil {
 			_ = c.blockingManager.Block(ctx, []protocol.ID{req.infoHash}, false)

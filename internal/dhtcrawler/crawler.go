@@ -17,7 +17,6 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 	boom "github.com/tylertreat/BoomFilters"
 	"go.uber.org/zap"
-	"golang.org/x/time/rate"
 )
 
 type crawler struct {
@@ -33,10 +32,9 @@ type crawler struct {
 	reseedBootstrapNodesInterval time.Duration
 	saveFilesThreshold           uint
 	savePieces                   bool
-	maxProcessInfoHashRate       int
 
 	processNodeLimit     limiter
-	processInfoHashLimit limiter
+	requestMetaInfoLimit limiter
 
 	recentlyProcessedNodes      *boom.StableBloomFilter
 	recentlyProcessedInfoHashes *boom.StableBloomFilter
@@ -49,8 +47,6 @@ type crawler struct {
 	soughtNodeID *concurrency.AtomicValue[protocol.ID]
 
 	logger *zap.SugaredLogger
-
-	obtainedMetaInfoCounter uint64
 
 	totalDiscoveredNodes     prometheus.Counter
 	totalProcessedNodes      prometheus.Counter
@@ -87,8 +83,6 @@ func (c *crawler) start(ctx context.Context) {
 	go c.reseedBootstrapNodes(ctx)
 	go c.runPersistTorrents(ctx)
 	go c.runPersistScrapes(ctx)
-	go c.adjustNodeLimit(ctx)
-	go c.adjustInfoHashLimit(ctx)
 }
 
 func (c *crawler) reseedBootstrapNodes(ctx context.Context) {
@@ -126,207 +120,4 @@ func (c *crawler) rotateSoughtNodeID(ctx context.Context) {
 		case <-time.After(10 * time.Second):
 		}
 	}
-}
-
-func (c *crawler) adjustNodeLimit(ctx context.Context) {
-	for {
-		c.processNodeRate.Set(float64(c.processNodeLimit.limit()))
-
-		select {
-		case <-ctx.Done():
-			return
-		case <-time.After(time.Second * 10):
-			currentLimit := c.processNodeLimit.limit()
-			newLimit := currentLimit
-
-			if c.processInfoHashLimit.isOverloaded() {
-				newLimit *= 0.99
-			} else if !c.processInfoHashLimit.isSaturated() {
-				newLimit *= 1.1
-			}
-
-			newLimit = max(newLimit, rate.Limit(10))
-			// Each node should provide on average more than one infohash.
-			// If we try to scale past the infohash processing limit, something
-			// is going wrong (e.g no internet causing 100% failure rate on
-			// processNode).
-			// Add this limit to prevent the process node limit from scaling to
-			// infinity.
-			newLimit = min(newLimit, c.processInfoHashLimit.limit())
-
-			if newLimit != currentLimit {
-				c.processNodeLimit.setLimit(newLimit)
-			}
-		}
-	}
-}
-
-func (c *crawler) adjustInfoHashLimit(ctx context.Context) {
-	for {
-		maxRate := rate.Limit(c.maxProcessInfoHashRate)
-		targetRate := rate.Limit(0)
-		if maxRate == 0 {
-			maxRate := c.findOptimalHashLimit(ctx)
-			targetRate = maxRate
-		}
-
-	adjustLoop:
-		for {
-			c.processHashRate.Set(float64(c.processInfoHashLimit.limit()))
-
-			select {
-			case <-ctx.Done():
-				return
-			case <-time.After(time.Minute):
-				currentLimit := c.processInfoHashLimit.limit()
-				newLimit := currentLimit
-
-				if !c.processInfoHashLimit.isSaturated() {
-					newLimit *= 0.99
-				} else {
-					newLimit *= 1.01
-				}
-
-				newLimit = max(newLimit, rate.Limit(10))
-				newLimit = min(newLimit, maxRate)
-
-				if newLimit != currentLimit {
-					c.processInfoHashLimit.setLimit(newLimit)
-				}
-
-				if targetRate != 0 && newLimit < 0.9*targetRate {
-					break adjustLoop
-				}
-			}
-		}
-	}
-}
-
-func (c *crawler) findOptimalHashLimit(ctx context.Context) rate.Limit {
-	setProcessLimit := func(limit rate.Limit) {
-		c.processInfoHashLimit.setLimit(limit)
-		c.processNodeLimit.setLimit(limit / 4)
-
-		c.processHashRate.Set(float64(limit))
-	}
-
-	setProcessLimit(10)
-
-	select {
-	case <-ctx.Done():
-		return 0
-	case <-time.After(time.Second * 10):
-	}
-
-	baseLatency := rate.InfDuration
-
-	measureLatency := func() time.Duration {
-		for range 10 {
-			start := time.Now()
-			conn, err := net.DialTimeout("tcp", "google.com:80", baseLatency*5)
-			if err != nil {
-				continue
-			}
-			delay := time.Since(start)
-
-			conn.Close()
-
-			return delay
-		}
-
-		return rate.InfDuration
-	}
-
-	baseLatency = max(measureLatency(), time.Second)
-
-	c.logger.Infof("Base latency is %.2f", baseLatency.Seconds())
-
-	checkOverload := func() bool {
-		latency := measureLatency()
-
-		c.logger.Infof("Current latency is %.2f", latency.Seconds())
-
-		if latency > baseLatency*3 {
-			c.logger.Infof("Overload!!")
-			return true
-		}
-
-		return false
-	}
-
-	testLimit := func(limit rate.Limit) uint64 {
-		setProcessLimit(limit)
-
-		nodesLimitAdjusted := time.After(time.Minute)
-	adjustNodes:
-		for {
-			select {
-			case <-ctx.Done():
-				return 0
-			case <-nodesLimitAdjusted:
-				break adjustNodes
-			case <-time.After(time.Second):
-				if checkOverload() {
-					setProcessLimit(10)
-					return 0
-				}
-			}
-		}
-
-		c.obtainedMetaInfoCounter = 0
-
-		testEnded := time.After(time.Minute * 10)
-
-		for {
-			select {
-			case <-ctx.Done():
-				return 0
-			case <-testEnded:
-				c.logger.Infof("Trying %f: %d in 10 minutes", limit, c.obtainedMetaInfoCounter)
-				return c.obtainedMetaInfoCounter
-			case <-time.After(time.Second):
-				if checkOverload() {
-					setProcessLimit(10)
-					return 0
-				}
-			}
-		}
-	}
-
-	baseLimit := rate.Limit(1)
-	rateCount := uint64(0)
-
-	for {
-		currentLimit := baseLimit * 10
-		count := testLimit(currentLimit)
-
-		if count >= rateCount {
-			baseLimit = currentLimit
-			rateCount = count
-		} else {
-			break
-		}
-	}
-
-	for increment := baseLimit; increment > 5; increment /= 10 {
-		maxLimit := baseLimit
-		maxCount := uint64(0)
-
-		for i := -9; i < 10; i++ {
-			currentLimit := baseLimit + increment*rate.Limit(i)
-			count := testLimit(currentLimit)
-
-			if count > maxCount {
-				maxLimit = currentLimit
-				maxCount = count
-			} else if count == 0 {
-				// We overloaded. Don't try higher.
-				break
-			}
-		}
-
-		baseLimit = maxLimit
-	}
-
-	return baseLimit
 }

@@ -2,7 +2,6 @@ package dhtcrawler
 
 import (
 	"context"
-	"errors"
 	"time"
 
 	"github.com/bitmagnet-io/bitmagnet/internal/blocking"
@@ -154,16 +153,6 @@ func New(params Params) Result {
 						return err
 					}
 
-					maxProcessHashRate := params.Config.MaxProcessHashRate
-					initialProcessHashRate := params.Config.InitialProcessHashRate
-					if initialProcessHashRate == 0 {
-						if maxProcessHashRate == 0 {
-							return errors.New("no initial hash processing rate was specified for an infinite maximum rate")
-						}
-
-						initialProcessHashRate = maxProcessHashRate
-					}
-
 					ctx, cancel = context.WithCancel(ctx)
 
 					c := crawler{
@@ -179,10 +168,9 @@ func New(params Params) Result {
 						reseedBootstrapNodesInterval: params.Config.ReseedBootstrapNodesInterval,
 						saveFilesThreshold:           params.Config.SaveFilesThreshold,
 						savePieces:                   params.Config.SavePieces,
-						maxProcessInfoHashRate:       maxProcessHashRate,
 
-						processNodeLimit:     newLimiter(initialProcessHashRate / 5),
-						processInfoHashLimit: newLimiter(initialProcessHashRate),
+						processNodeLimit:     newLimiter(params.Config.ProcessNodeLimit),
+						requestMetaInfoLimit: newLimiter(params.Config.RequestMetaInfoLimit),
 
 						recentlyProcessedNodes:      boom.NewStableBloomFilter(10_000_000, 2, 0.001),
 						recentlyProcessedInfoHashes: boom.NewStableBloomFilter(10_000_000, 2, 0.001),

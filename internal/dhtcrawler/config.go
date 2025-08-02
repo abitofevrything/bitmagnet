@@ -5,10 +5,8 @@ import (
 )
 
 type Config struct {
-	// Set to 0 to have no limit.
-	MaxProcessHashRate int
-	// Set to 0 to initially use the max rate.
-	InitialProcessHashRate       int
+	ProcessNodeLimit             int
+	RequestMetaInfoLimit         int
 	BootstrapNodes               []string
 	ReseedBootstrapNodesInterval time.Duration
 	// SaveFilesThreshold specifies a maximum number of files in a torrent before file information is discarded.
@@ -25,8 +23,8 @@ type Config struct {
 
 func NewDefaultConfig() Config {
 	return Config{
-		MaxProcessHashRate:           100,
-		InitialProcessHashRate:       0,
+		ProcessNodeLimit:             100,
+		RequestMetaInfoLimit:         100,
 		BootstrapNodes:               defaultBootstrapNodes,
 		ReseedBootstrapNodesInterval: time.Minute,
 		SaveFilesThreshold:           100,

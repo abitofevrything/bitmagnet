@@ -18,19 +18,6 @@ func (l limiter) isSaturated() bool {
 	return l.lim.Tokens() <= float64(l.lim.Limit())
 }
 
-func (l limiter) isOverloaded() bool {
-	return l.lim.Tokens() <= float64(l.lim.Limit()/10)
-}
-
 func (l limiter) allow() bool {
 	return l.lim.Allow()
-}
-
-func (l limiter) limit() rate.Limit {
-	return l.lim.Limit()
-}
-
-func (l limiter) setLimit(limit rate.Limit) {
-	l.lim.SetLimit(limit)
-	l.lim.SetBurst(int(limit * 3))
 }
