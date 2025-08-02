@@ -110,6 +110,7 @@ func (c *crawler) processInfohashes(ctx context.Context, reqs []nodeWithHash) {
 			(t.FilesStatus == model.FilesStatusOverThreshold && t.FilesCount.Uint <= c.saveFilesThreshold) {
 
 			if !c.requestMetaInfoLimit.allow() {
+				c.totalProcessedHashes.With(prometheus.Labels{"result": "dropped"}).Inc()
 				continue
 			}
 

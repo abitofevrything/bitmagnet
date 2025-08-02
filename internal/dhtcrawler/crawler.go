@@ -48,15 +48,11 @@ type crawler struct {
 
 	logger *zap.SugaredLogger
 
-	totalDiscoveredNodes     prometheus.Counter
-	totalProcessedNodes      prometheus.Counter
-	totalDiscoveredHashes    prometheus.Counter
-	totalProcessedHashes     *prometheus.CounterVec
-	totalPersisted           *prometheus.CounterVec
-	processNodeRate          prometheus.Gauge
-	processHashRate          prometheus.Gauge
-	recentNodeRatioCollector prometheus.Gauge
-	nodeRatioCollector       prometheus.Gauge
+	totalDiscoveredNodes  prometheus.Counter
+	totalProcessedNodes   prometheus.Counter
+	totalDiscoveredHashes prometheus.Counter
+	totalProcessedHashes  *prometheus.CounterVec
+	totalPersisted        *prometheus.CounterVec
 }
 
 type nodeWithHash struct {

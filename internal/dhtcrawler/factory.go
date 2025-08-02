@@ -43,10 +43,6 @@ type Result struct {
 	TotalDiscoveredHashes prometheus.Collector `group:"prometheus_collectors"`
 	TotalProcessedHashes  prometheus.Collector `group:"prometheus_collectors"`
 	TotalPersisted        prometheus.Collector `group:"prometheus_collectors"`
-	ProcessNodeRate       prometheus.Collector `group:"prometheus_collectors"`
-	ProcessHashRate       prometheus.Collector `group:"prometheus_collectors"`
-	RecentNodeRatio       prometheus.Collector `group:"prometheus_collectors"`
-	NodeRatio             prometheus.Collector `group:"prometheus_collectors"`
 }
 
 const (
@@ -95,34 +91,6 @@ func New(params Params) Result {
 		Help:      "A counter of persisted database entities.",
 	}, []string{"entity"})
 
-	processNodeRate := prometheus.NewGauge(prometheus.GaugeOpts{
-		Namespace: namespace,
-		Subsystem: subsystem,
-		Name:      "process_node_rate",
-		Help:      "The rate (per second) at which the DHT crawler tries to process nodes",
-	})
-
-	processHashRate := prometheus.NewGauge(prometheus.GaugeOpts{
-		Namespace: namespace,
-		Subsystem: subsystem,
-		Name:      "process_hash_rate",
-		Help:      "The rate (per second) at which the DHT crawler tries to process infohashes",
-	})
-
-	recentNodeRatio := prometheus.NewGauge(prometheus.GaugeOpts{
-		Namespace: namespace,
-		Subsystem: subsystem,
-		Name:      "recent_node_ratio",
-		Help:      "The average number of infohashes returned per processed node (recent nodes only)",
-	})
-
-	nodeRatio := prometheus.NewGauge(prometheus.GaugeOpts{
-		Namespace: namespace,
-		Subsystem: subsystem,
-		Name:      "node_ratio",
-		Help:      "The average number of infohashes returned per processed node (long running average)",
-	})
-
 	return Result{
 		DhtCrawlerActive:      active,
 		TotalDiscoveredNodes:  totalDiscoveredNodes,
@@ -130,10 +98,6 @@ func New(params Params) Result {
 		TotalDiscoveredHashes: totalDiscoveredHashes,
 		TotalProcessedHashes:  totalProcessedHashes,
 		TotalPersisted:        totalPersisted,
-		ProcessNodeRate:       processNodeRate,
-		ProcessHashRate:       processHashRate,
-		RecentNodeRatio:       recentNodeRatio,
-		NodeRatio:             nodeRatio,
 		Worker: worker.NewWorker(
 			"dht_crawler",
 			fx.Hook{
@@ -184,15 +148,11 @@ func New(params Params) Result {
 
 						logger: params.Logger,
 
-						totalDiscoveredNodes:     totalDiscoveredNodes,
-						totalProcessedNodes:      totalProcessedNodes,
-						totalDiscoveredHashes:    totalDiscoveredHashes,
-						totalProcessedHashes:     totalProcessedHashes,
-						totalPersisted:           totalPersisted,
-						processNodeRate:          processNodeRate,
-						processHashRate:          processHashRate,
-						recentNodeRatioCollector: recentNodeRatio,
-						nodeRatioCollector:       nodeRatio,
+						totalDiscoveredNodes:  totalDiscoveredNodes,
+						totalProcessedNodes:   totalProcessedNodes,
+						totalDiscoveredHashes: totalDiscoveredHashes,
+						totalProcessedHashes:  totalProcessedHashes,
+						totalPersisted:        totalPersisted,
 					}
 
 					go c.start(ctx)
