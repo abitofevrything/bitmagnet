@@ -23,24 +23,6 @@ func (k *nodeKeyspace) getLastRespondedBefore(t time.Time) []Node {
 	return peers
 }
 
-func (k *nodeKeyspace) getCandidatesForSampleInfoHashes(n int) []*node {
-	//nolint:prealloc
-	var candidates []*node
-
-	for _, it := range k.items {
-		if !it.IsSampleInfoHashesCandidate() {
-			continue
-		}
-
-		candidates = append(candidates, it)
-		if len(candidates) == n {
-			break
-		}
-	}
-
-	return candidates
-}
-
 type Node interface {
 	keyspaceItem
 	Addr() netip.AddrPort
