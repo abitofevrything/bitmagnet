@@ -2,7 +2,6 @@ package dhtcrawler
 
 import (
 	"context"
-	"time"
 
 	"github.com/bitmagnet-io/bitmagnet/internal/database/dao"
 	"github.com/bitmagnet-io/bitmagnet/internal/model"
@@ -39,10 +38,7 @@ func (c *crawler) runPersistTorrents(ctx context.Context) {
 				if len(hashesToClassify) > 0 {
 					job, err := processor.NewQueueJob(processor.MessageParams{
 						InfoHashes: hashesToClassify,
-					},
-						// delay the classifier by a minute to allow time for the S/L scrape:
-						model.QueueJobDelayBy(time.Minute),
-					)
+					})
 					if err != nil {
 						c.logger.Errorf("error creating queue job: %s", err.Error())
 					} else {
