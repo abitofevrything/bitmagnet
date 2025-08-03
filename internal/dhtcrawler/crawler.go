@@ -79,6 +79,7 @@ func (c *crawler) start(ctx context.Context) {
 	go c.reseedBootstrapNodes(ctx)
 	go c.runPersistTorrents(ctx)
 	go c.runPersistScrapes(ctx)
+	go c.refreshKTable(ctx)
 }
 
 func (c *crawler) reseedBootstrapNodes(ctx context.Context) {
@@ -114,6 +115,24 @@ func (c *crawler) rotateSoughtNodeID(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-time.After(10 * time.Second):
+		}
+	}
+}
+
+func (c *crawler) refreshKTable(ctx context.Context) {
+	for {
+		lastRun := time.Now()
+
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(15 * time.Minute):
+			oldNodes := c.kTable.GetOldestNodes(lastRun, 10)
+			for _, node := range oldNodes {
+				// We could just ping the node, but if we're issuing a KRPC
+				// call regardless, we might as well run a find_node.
+				go c.runFindNode(ctx, node)
+			}
 		}
 	}
 }
