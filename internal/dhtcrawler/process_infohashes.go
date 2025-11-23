@@ -26,6 +26,7 @@ func (c *crawler) handleDiscoveredInfohashes(ctx context.Context) {
 			c.totalDiscoveredHashes.Inc()
 
 			if c.recentlyProcessedInfoHashes.TestAndAdd(req.infoHash.Bytes()) {
+				c.totalProcessedHashes.With(prometheus.Labels{"result": "duplicate"}).Inc()
 				continue
 			}
 
