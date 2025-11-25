@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql/driver"
 	"fmt"
+	"net/netip"
 	"strconv"
 	"time"
 
@@ -46,10 +47,13 @@ func (c *crawler) handleDiscoveredInfohashes(ctx context.Context) {
 					bestNodes = nodes
 				}
 			}
-			for hash, nodes := range pendingMetaInfoNodes {
-				if len(nodes) > len(bestNodes) {
-					bestInfoHash = hash
-					bestNodes = nodes
+
+			if len(bestNodes) == 0 {
+				for hash, nodes := range pendingMetaInfoNodes {
+					if len(nodes) > len(bestNodes) {
+						bestInfoHash = hash
+						bestNodes = nodes
+					}
 				}
 			}
 
@@ -79,10 +83,12 @@ func (c *crawler) handleDiscoveredInfohashes(ctx context.Context) {
 				}
 			}
 
-			for hash, nodes := range pendingScrapeNodes {
-				if len(nodes) > len(bestNodes) {
-					bestInfoHash = hash
-					bestNodes = nodes
+			if len(bestNodes) == 0 {
+				for hash, nodes := range pendingScrapeNodes {
+					if len(nodes) > len(bestNodes) {
+						bestInfoHash = hash
+						bestNodes = nodes
+					}
 				}
 			}
 
@@ -240,7 +246,15 @@ func (c *crawler) processInfohashes(ctx context.Context, reqs []protocol.ID) {
 }
 
 func (c *crawler) requestMetaInfo(ctx context.Context, infoHash protocol.ID, nodes []ktable.Node) {
+	seenNodes := make(map[netip.AddrPort]struct{})
+	seenPeers := make(map[netip.AddrPort]struct{})
+
 	for _, node := range nodes {
+		if _, ok := seenNodes[node.Addr()]; ok {
+			continue
+		}
+		seenNodes[node.Addr()] = struct{}{}
+
 		peersRes, err := c.client.GetPeersScrape(ctx, node.Addr(), infoHash)
 		if err != nil {
 			c.kTable.BatchCommand(ktable.DropAddr{
@@ -280,6 +294,11 @@ func (c *crawler) requestMetaInfo(ctx context.Context, infoHash protocol.ID, nod
 		}
 
 		for _, p := range peers {
+			if _, ok := seenPeers[p]; ok {
+				continue
+			}
+			seenPeers[p] = struct{}{}
+
 			res, err := c.metainfoRequester.Request(ctx, infoHash, p)
 			if err != nil {
 				continue
@@ -311,7 +330,14 @@ func (c *crawler) requestMetaInfo(ctx context.Context, infoHash protocol.ID, nod
 }
 
 func (c *crawler) scrape(ctx context.Context, infoHash protocol.ID, nodes []ktable.Node) {
+	seenNodes := make(map[netip.AddrPort]struct{})
+
 	for _, node := range nodes {
+		if _, ok := seenNodes[node.Addr()]; ok {
+			continue
+		}
+		seenNodes[node.Addr()] = struct{}{}
+
 		res, err := c.client.GetPeersScrape(ctx, node.Addr(), infoHash)
 		if err != nil {
 			c.kTable.BatchCommand(ktable.DropAddr{
