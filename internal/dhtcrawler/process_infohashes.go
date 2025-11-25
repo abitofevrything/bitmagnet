@@ -262,7 +262,7 @@ func (c *crawler) requestMetaInfo(ctx context.Context, infoHash protocol.ID, nod
 				Reason: fmt.Errorf("failed to get peers: %w", err),
 			})
 
-			return
+			continue
 		}
 
 		c.kTable.BatchCommand(ktable.PutNode{
@@ -283,7 +283,7 @@ func (c *crawler) requestMetaInfo(ctx context.Context, infoHash protocol.ID, nod
 					Reason: fmt.Errorf("failed to get peers: %w", err),
 				})
 
-				return
+				continue
 			}
 
 			peers = newPeersRes.Values
@@ -345,7 +345,7 @@ func (c *crawler) scrape(ctx context.Context, infoHash protocol.ID, nodes []ktab
 				Reason: fmt.Errorf("failed to get peers from p: %w", err),
 			})
 
-			return
+			continue
 		}
 
 		c.kTable.BatchCommand(ktable.PutNode{
@@ -359,7 +359,7 @@ func (c *crawler) scrape(ctx context.Context, infoHash protocol.ID, nodes []ktab
 		}
 
 		if res.BfPeers == nil || res.BfSeeders == nil {
-			return
+			continue
 		}
 
 		c.scrapesToPersist.In() <- hashWithScrape{
@@ -367,5 +367,7 @@ func (c *crawler) scrape(ctx context.Context, infoHash protocol.ID, nodes []ktab
 			seeders:  res.BfSeeders.ApproximatedSize(),
 			leechers: res.BfPeers.ApproximatedSize(),
 		}
+
+		return
 	}
 }
