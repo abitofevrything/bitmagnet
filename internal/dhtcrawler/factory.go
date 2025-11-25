@@ -133,6 +133,7 @@ func New(params Params) Result {
 						saveFilesThreshold:           params.Config.SaveFilesThreshold,
 						savePieces:                   params.Config.SavePieces,
 						nodeLingerInterval:           params.Config.NodeLingerInterval,
+						hashRotationInterval:         params.Config.HashRotationInterval,
 
 						processNodeLimit:     newLimiter(params.Config.ProcessNodeLimit),
 						requestMetaInfoLimit: newLimiter(params.Config.RequestMetaInfoLimit),

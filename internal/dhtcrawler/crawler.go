@@ -33,6 +33,7 @@ type crawler struct {
 	saveFilesThreshold           uint
 	savePieces                   bool
 	nodeLingerInterval           time.Duration
+	hashRotationInterval         time.Duration
 
 	processNodeLimit     limiter
 	requestMetaInfoLimit limiter

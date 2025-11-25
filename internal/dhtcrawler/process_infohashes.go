@@ -27,7 +27,7 @@ func (c *crawler) handleDiscoveredInfohashes(ctx context.Context) {
 	prevPendingScrapeNodes := make(map[protocol.ID][]ktable.Node)
 	pendingScrapeNodes := make(map[protocol.ID][]ktable.Node)
 
-	rotate := time.After(max(c.nodeLingerInterval, databaseBatchInterval))
+	rotate := time.After(c.hashRotationInterval)
 	nextRequestMetaInfo := time.After(c.requestMetaInfoLimit.lim.Reserve().Delay())
 	nextScrape := time.After(c.scrapeLimit.lim.Reserve().Delay())
 
@@ -143,7 +143,7 @@ func (c *crawler) handleDiscoveredInfohashes(ctx context.Context) {
 			prevPendingScrapeNodes = pendingScrapeNodes
 			pendingScrapeNodes = make(map[protocol.ID][]ktable.Node)
 
-			rotate = time.After(max(c.nodeLingerInterval, databaseBatchInterval))
+			rotate = time.After(c.hashRotationInterval)
 		case req := <-c.discoveredInfoHashes:
 			c.totalDiscoveredHashes.Inc()
 
