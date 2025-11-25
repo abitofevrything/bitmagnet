@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql/driver"
 	"fmt"
+	"strconv"
 	"time"
 
 	"github.com/bitmagnet-io/bitmagnet/internal/concurrency"
@@ -14,23 +15,158 @@ import (
 )
 
 func (c *crawler) handleDiscoveredInfohashes(ctx context.Context) {
-	batchedChannel := concurrency.NewBatchingChannel[nodeWithHash](100, databaseBatchSize, databaseBatchInterval)
+	processBatch := concurrency.NewBatchingChannel[protocol.ID](100, databaseBatchSize, databaseBatchInterval)
+
+	prevWaitingNodes := make(map[protocol.ID][]ktable.Node)
+	waitingNodes := make(map[protocol.ID][]ktable.Node)
+
+	prevPendingMetaInfoNodes := make(map[protocol.ID][]ktable.Node)
+	pendingMetaInfoNodes := make(map[protocol.ID][]ktable.Node)
+
+	prevPendingScrapeNodes := make(map[protocol.ID][]ktable.Node)
+	pendingScrapeNodes := make(map[protocol.ID][]ktable.Node)
+
+	rotate := time.After(max(c.nodeLingerInterval, databaseBatchInterval))
+	nextRequestMetaInfo := time.After(c.requestMetaInfoLimit.lim.Reserve().Delay())
+	nextScrape := time.After(c.scrapeLimit.lim.Reserve().Delay())
 
 	for {
 		select {
 		case <-ctx.Done():
 			return
-		case batch := <-batchedChannel.Out():
+		case batch := <-processBatch.Out():
 			go c.processInfohashes(ctx, batch)
-		case req := <-c.discoveredInfoHashes:
-			c.totalDiscoveredHashes.Inc()
+		case <-nextRequestMetaInfo:
+			var bestInfoHash protocol.ID
+			var bestNodes []ktable.Node
 
-			if c.recentlyProcessedInfoHashes.TestAndAdd(req.infoHash.Bytes()) {
-				c.totalProcessedHashes.With(prometheus.Labels{"result": "duplicate"}).Inc()
+			for hash, nodes := range prevPendingMetaInfoNodes {
+				if len(nodes) > len(bestNodes) {
+					bestInfoHash = hash
+					bestNodes = nodes
+				}
+			}
+			for hash, nodes := range pendingMetaInfoNodes {
+				if len(nodes) > len(bestNodes) {
+					bestInfoHash = hash
+					bestNodes = nodes
+				}
+			}
+
+			if len(bestNodes) == 0 {
+				nextRequestMetaInfo = time.After(100 * time.Millisecond)
 				continue
 			}
 
-			batchedChannel.In() <- req
+			delete(prevPendingMetaInfoNodes, bestInfoHash)
+			delete(pendingMetaInfoNodes, bestInfoHash)
+
+			c.recentlyProcessedInfoHashes.Add(bestInfoHash.Bytes())
+
+			c.totalProcessedHashes.With(prometheus.Labels{"result": "request_metainfo", "num_nodes": strconv.Itoa(len(bestNodes))}).Inc()
+
+			go c.requestMetaInfo(ctx, bestInfoHash, bestNodes)
+
+			nextRequestMetaInfo = time.After(c.requestMetaInfoLimit.lim.Reserve().Delay())
+		case <-nextScrape:
+			var bestInfoHash protocol.ID
+			var bestNodes []ktable.Node
+
+			for hash, nodes := range prevPendingScrapeNodes {
+				if len(nodes) > len(bestNodes) {
+					bestInfoHash = hash
+					bestNodes = nodes
+				}
+			}
+
+			for hash, nodes := range pendingScrapeNodes {
+				if len(nodes) > len(bestNodes) {
+					bestInfoHash = hash
+					bestNodes = nodes
+				}
+			}
+
+			if len(bestNodes) == 0 {
+				nextScrape = time.After(100 * time.Millisecond)
+				continue
+			}
+
+			delete(prevPendingScrapeNodes, bestInfoHash)
+			delete(pendingScrapeNodes, bestInfoHash)
+
+			c.recentlyProcessedInfoHashes.Add(bestInfoHash.Bytes())
+
+			c.totalProcessedHashes.With(prometheus.Labels{"result": "scrape", "num_nodes": strconv.Itoa(len(bestNodes))}).Inc()
+
+			go c.scrape(ctx, bestInfoHash, bestNodes)
+
+			nextScrape = time.After(c.scrapeLimit.lim.Reserve().Delay())
+		case hash := <-c.infoHashesToRequestMetaInfo:
+			if nodes, ok := prevWaitingNodes[hash]; ok {
+				pendingMetaInfoNodes[hash] = nodes
+				delete(prevWaitingNodes, hash)
+			} else {
+				pendingMetaInfoNodes[hash] = waitingNodes[hash]
+				delete(waitingNodes, hash)
+			}
+		case hash := <-c.infoHashesToScrape:
+			if nodes, ok := prevWaitingNodes[hash]; ok {
+				pendingScrapeNodes[hash] = nodes
+				delete(prevWaitingNodes, hash)
+			} else {
+				pendingScrapeNodes[hash] = waitingNodes[hash]
+				delete(waitingNodes, hash)
+			}
+		case <-rotate:
+			for _, nodes := range prevWaitingNodes {
+				c.totalProcessedHashes.With(prometheus.Labels{"result": "skipped", "num_nodes": strconv.Itoa(len(nodes))}).Inc()
+			}
+			for _, nodes := range prevPendingMetaInfoNodes {
+				c.totalProcessedHashes.With(prometheus.Labels{"result": "dropped_pending_metainfo", "num_nodes": strconv.Itoa(len(nodes))}).Inc()
+			}
+			for _, nodes := range prevPendingScrapeNodes {
+				c.totalProcessedHashes.With(prometheus.Labels{"result": "dropped_pending_scrape", "num_nodes": strconv.Itoa(len(nodes))}).Inc()
+			}
+
+			prevWaitingNodes = waitingNodes
+			waitingNodes = make(map[protocol.ID][]ktable.Node)
+
+			prevPendingMetaInfoNodes = pendingMetaInfoNodes
+			pendingMetaInfoNodes = make(map[protocol.ID][]ktable.Node)
+
+			prevPendingScrapeNodes = pendingScrapeNodes
+			pendingScrapeNodes = make(map[protocol.ID][]ktable.Node)
+
+			rotate = time.After(max(c.nodeLingerInterval, databaseBatchInterval))
+		case req := <-c.discoveredInfoHashes:
+			c.totalDiscoveredHashes.Inc()
+
+			if c.recentlyProcessedInfoHashes.Test(req.infoHash.Bytes()) {
+				c.totalProcessedHashes.With(prometheus.Labels{"result": "already_processed", "num_nodes": "1"}).Inc()
+				continue
+			}
+
+			if _, ok := prevPendingMetaInfoNodes[req.infoHash]; ok {
+				prevPendingMetaInfoNodes[req.infoHash] = append(prevPendingMetaInfoNodes[req.infoHash], req.node)
+			} else if _, ok := pendingMetaInfoNodes[req.infoHash]; ok {
+				pendingMetaInfoNodes[req.infoHash] = append(pendingMetaInfoNodes[req.infoHash], req.node)
+			} else if _, ok := prevPendingScrapeNodes[req.infoHash]; ok {
+				prevPendingScrapeNodes[req.infoHash] = append(prevPendingScrapeNodes[req.infoHash], req.node)
+			} else if _, ok := pendingScrapeNodes[req.infoHash]; ok {
+				pendingScrapeNodes[req.infoHash] = append(pendingScrapeNodes[req.infoHash], req.node)
+			} else {
+				if _, ok := prevWaitingNodes[req.infoHash]; ok {
+					prevWaitingNodes[req.infoHash] = append(prevWaitingNodes[req.infoHash], req.node)
+				} else {
+					waitingNodes[req.infoHash] = append(waitingNodes[req.infoHash], req.node)
+				}
+
+				if c.recentlyScheduledInfoHashes.TestAndAdd(req.infoHash.Bytes()) {
+					continue
+				}
+
+				processBatch.In() <- req.infoHash
+			}
 		}
 	}
 }
@@ -44,26 +180,12 @@ type triageResult struct {
 	UpdatedAt   time.Time
 }
 
-func (c *crawler) processInfohashes(ctx context.Context, reqs []nodeWithHash) {
-	allHashes := make([]protocol.ID, 0, len(reqs))
-
-	reqMap := make(map[protocol.ID]nodeWithHash, len(reqs))
-	for _, r := range reqs {
-		if _, ok := reqMap[r.infoHash]; ok {
-			continue
-		}
-
-		allHashes = append(allHashes, r.infoHash)
-		reqMap[r.infoHash] = r
-	}
-
-	filteredHashes, filterErr := c.blockingManager.Filter(ctx, allHashes)
+func (c *crawler) processInfohashes(ctx context.Context, reqs []protocol.ID) {
+	filteredHashes, filterErr := c.blockingManager.Filter(ctx, reqs)
 	if filterErr != nil {
 		c.logger.Errorf("failed to filter infohashes: %s", filterErr.Error())
 		return
 	}
-
-	c.totalProcessedHashes.With(prometheus.Labels{"result": "filtered"}).Add(float64(len(allHashes) - len(filteredHashes)))
 
 	if len(filteredHashes) == 0 {
 		return
@@ -99,139 +221,125 @@ func (c *crawler) processInfohashes(ctx context.Context, reqs []nodeWithHash) {
 		foundTorrents[t.InfoHash] = *t
 	}
 
-	// Spread out processing each individual infohash to avoid batching network
-	// operations.
-	interval := time.Duration(int(databaseBatchInterval) / len(filteredHashes))
-
 	for _, h := range filteredHashes {
-		r := reqMap[h]
-		if t, ok := foundTorrents[r.infoHash]; !ok ||
+		if t, ok := foundTorrents[h]; !ok ||
 			t.FilesStatus == model.FilesStatusNoInfo ||
 			(t.FilesStatus != model.FilesStatusSingle && !t.FilesCount.Valid) ||
 			(t.FilesStatus == model.FilesStatusOverThreshold && t.FilesCount.Uint <= c.saveFilesThreshold) {
 
-			if !c.requestMetaInfoLimit.allow() {
-				c.totalProcessedHashes.With(prometheus.Labels{"result": "dropped"}).Inc()
-				continue
-			}
-
-			c.totalProcessedHashes.With(prometheus.Labels{"result": "request_metainfo"}).Inc()
-			go c.requestMetaInfo(ctx, r)
+			c.infoHashesToRequestMetaInfo <- h
 		} else if (!t.Seeders.Valid || !t.Leechers.Valid) ||
 			t.UpdatedAt.Before(time.Now().Add(-c.rescrapeThreshold)) {
 
-			c.totalProcessedHashes.With(prometheus.Labels{"result": "scrape"}).Inc()
-			go c.scrape(ctx, r)
+			c.infoHashesToScrape <- h
 		} else {
-			c.totalProcessedHashes.With(prometheus.Labels{"result": "skipped"}).Inc()
-		}
-
-		select {
-		case <-time.After(interval):
-			continue
-		case <-ctx.Done():
-			return
+			// Skip
+			c.recentlyProcessedInfoHashes.Add(h.Bytes())
 		}
 	}
 }
 
-func (c *crawler) requestMetaInfo(ctx context.Context, req nodeWithHash) {
-	peersRes, err := c.client.GetPeersScrape(ctx, req.node.Addr(), req.infoHash)
-	if err != nil {
-		c.kTable.BatchCommand(ktable.DropAddr{
-			Addr:   req.node.Addr().Addr(),
-			Reason: fmt.Errorf("failed to get peers: %w", err),
-		})
-
-		return
-	}
-
-	c.kTable.BatchCommand(ktable.PutNode{
-		ID:      peersRes.ID,
-		Addr:    req.node.Addr(),
-		Options: []ktable.NodeOption{ktable.NodeResponded()},
-	})
-
-	peers := peersRes.Values
-	// Some nodes don't return peers when doing a DHT scrape
-	// (see for example https://github.com/arvidn/libtorrent/issues/8005)
-	// Try again without scrape.
-	if len(peers) == 0 {
-		newPeersRes, err := c.client.GetPeers(ctx, req.node.Addr(), req.infoHash)
+func (c *crawler) requestMetaInfo(ctx context.Context, infoHash protocol.ID, nodes []ktable.Node) {
+	for _, node := range nodes {
+		peersRes, err := c.client.GetPeersScrape(ctx, node.Addr(), infoHash)
 		if err != nil {
 			c.kTable.BatchCommand(ktable.DropAddr{
-				Addr:   req.node.Addr().Addr(),
+				Addr:   node.Addr().Addr(),
 				Reason: fmt.Errorf("failed to get peers: %w", err),
 			})
 
 			return
 		}
 
-		peers = newPeersRes.Values
-	}
+		c.kTable.BatchCommand(ktable.PutNode{
+			ID:      peersRes.ID,
+			Addr:    node.Addr(),
+			Options: []ktable.NodeOption{ktable.NodeResponded()},
+		})
 
-	for _, node := range peersRes.Nodes {
-		c.discoveredNodes <- ktable.NewNode(node.ID, node.Addr)
-	}
+		peers := peersRes.Values
+		// Some nodes don't return peers when doing a DHT scrape
+		// (see for example https://github.com/arvidn/libtorrent/issues/8005)
+		// Try again without scrape.
+		if len(peers) == 0 {
+			newPeersRes, err := c.client.GetPeers(ctx, node.Addr(), infoHash)
+			if err != nil {
+				c.kTable.BatchCommand(ktable.DropAddr{
+					Addr:   node.Addr().Addr(),
+					Reason: fmt.Errorf("failed to get peers: %w", err),
+				})
 
-	for _, p := range peers {
-		res, err := c.metainfoRequester.Request(ctx, req.infoHash, p)
-		if err != nil {
-			continue
+				return
+			}
+
+			peers = newPeersRes.Values
 		}
 
-		if banErr := c.banningChecker.Check(res.Info); banErr != nil {
-			_ = c.blockingManager.Block(ctx, []protocol.ID{req.infoHash}, false)
+		for _, node := range peersRes.Nodes {
+			c.discoveredNodes <- ktable.NewNode(node.ID, node.Addr)
+		}
+
+		for _, p := range peers {
+			res, err := c.metainfoRequester.Request(ctx, infoHash, p)
+			if err != nil {
+				continue
+			}
+
+			if banErr := c.banningChecker.Check(res.Info); banErr != nil {
+				_ = c.blockingManager.Block(ctx, []protocol.ID{infoHash}, false)
+				return
+			}
+
+			var scrape *hashWithScrape
+			if peersRes.BfPeers != nil && peersRes.BfSeeders != nil {
+				scrape = &hashWithScrape{
+					infoHash: infoHash,
+					seeders:  peersRes.BfSeeders.ApproximatedSize(),
+					leechers: peersRes.BfPeers.ApproximatedSize(),
+				}
+			}
+
+			c.torrentsToPersist.In() <- hashWithMetaInfo{
+				infoHash: infoHash,
+				metaInfo: res.Info,
+				scrape:   scrape,
+			}
+
 			return
 		}
-
-		var scrape *hashWithScrape
-		if peersRes.BfPeers != nil && peersRes.BfSeeders != nil {
-			scrape = &hashWithScrape{
-				infoHash: req.infoHash,
-				seeders:  peersRes.BfSeeders.ApproximatedSize(),
-				leechers: peersRes.BfPeers.ApproximatedSize(),
-			}
-		}
-
-		c.torrentsToPersist.In() <- hashWithMetaInfo{
-			infoHash: req.infoHash,
-			metaInfo: res.Info,
-			scrape:   scrape,
-		}
-
-		return
 	}
 }
 
-func (c *crawler) scrape(ctx context.Context, req nodeWithHash) {
-	res, err := c.client.GetPeersScrape(ctx, req.node.Addr(), req.infoHash)
-	if err != nil {
-		c.kTable.BatchCommand(ktable.DropAddr{
-			Addr:   req.node.Addr().Addr(),
-			Reason: fmt.Errorf("failed to get peers from p: %w", err),
+func (c *crawler) scrape(ctx context.Context, infoHash protocol.ID, nodes []ktable.Node) {
+	for _, node := range nodes {
+		res, err := c.client.GetPeersScrape(ctx, node.Addr(), infoHash)
+		if err != nil {
+			c.kTable.BatchCommand(ktable.DropAddr{
+				Addr:   node.Addr().Addr(),
+				Reason: fmt.Errorf("failed to get peers from p: %w", err),
+			})
+
+			return
+		}
+
+		c.kTable.BatchCommand(ktable.PutNode{
+			ID:      res.ID,
+			Addr:    node.Addr(),
+			Options: []ktable.NodeOption{ktable.NodeResponded()},
 		})
 
-		return
-	}
+		for _, node := range res.Nodes {
+			c.discoveredNodes <- ktable.NewNode(node.ID, node.Addr)
+		}
 
-	c.kTable.BatchCommand(ktable.PutNode{
-		ID:      res.ID,
-		Addr:    req.node.Addr(),
-		Options: []ktable.NodeOption{ktable.NodeResponded()},
-	})
+		if res.BfPeers == nil || res.BfSeeders == nil {
+			return
+		}
 
-	for _, node := range res.Nodes {
-		c.discoveredNodes <- ktable.NewNode(node.ID, node.Addr)
-	}
-
-	if res.BfPeers == nil || res.BfSeeders == nil {
-		return
-	}
-
-	c.scrapesToPersist.In() <- hashWithScrape{
-		infoHash: req.infoHash,
-		seeders:  res.BfSeeders.ApproximatedSize(),
-		leechers: res.BfPeers.ApproximatedSize(),
+		c.scrapesToPersist.In() <- hashWithScrape{
+			infoHash: infoHash,
+			seeders:  res.BfSeeders.ApproximatedSize(),
+			leechers: res.BfPeers.ApproximatedSize(),
+		}
 	}
 }

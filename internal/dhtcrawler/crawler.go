@@ -32,17 +32,22 @@ type crawler struct {
 	reseedBootstrapNodesInterval time.Duration
 	saveFilesThreshold           uint
 	savePieces                   bool
+	nodeLingerInterval           time.Duration
 
 	processNodeLimit     limiter
 	requestMetaInfoLimit limiter
+	scrapeLimit          limiter
 
 	recentlyProcessedNodes      *boom.StableBloomFilter
 	recentlyProcessedInfoHashes *boom.StableBloomFilter
+	recentlyScheduledInfoHashes *boom.StableBloomFilter
 
-	discoveredNodes      chan ktable.Node
-	discoveredInfoHashes chan nodeWithHash
-	torrentsToPersist    concurrency.BatchingChannel[hashWithMetaInfo]
-	scrapesToPersist     concurrency.BatchingChannel[hashWithScrape]
+	discoveredNodes             chan ktable.Node
+	discoveredInfoHashes        chan nodeWithHash
+	infoHashesToScrape          chan protocol.ID
+	infoHashesToRequestMetaInfo chan protocol.ID
+	torrentsToPersist           concurrency.BatchingChannel[hashWithMetaInfo]
+	scrapesToPersist            concurrency.BatchingChannel[hashWithScrape]
 
 	soughtNodeID *concurrency.AtomicValue[protocol.ID]
 
@@ -114,7 +119,7 @@ func (c *crawler) rotateSoughtNodeID(ctx context.Context) {
 		select {
 		case <-ctx.Done():
 			return
-		case <-time.After(10 * time.Second):
+		case <-time.After(c.nodeLingerInterval):
 		}
 	}
 }

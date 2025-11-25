@@ -82,7 +82,7 @@ func New(params Params) Result {
 		Subsystem: subsystem,
 		Name:      "processed_hashes_total",
 		Help:      "The total number of infohashes processed by the crawler.",
-	}, []string{"result"})
+	}, []string{"result", "num_nodes"})
 
 	totalPersisted := prometheus.NewCounterVec(prometheus.CounterOpts{
 		Namespace: namespace,
@@ -132,17 +132,22 @@ func New(params Params) Result {
 						reseedBootstrapNodesInterval: params.Config.ReseedBootstrapNodesInterval,
 						saveFilesThreshold:           params.Config.SaveFilesThreshold,
 						savePieces:                   params.Config.SavePieces,
+						nodeLingerInterval:           params.Config.NodeLingerInterval,
 
 						processNodeLimit:     newLimiter(params.Config.ProcessNodeLimit),
 						requestMetaInfoLimit: newLimiter(params.Config.RequestMetaInfoLimit),
+						scrapeLimit:          newLimiter(params.Config.ScrapeLimit),
 
 						recentlyProcessedNodes:      boom.NewStableBloomFilter(10_000_000, 2, 0.001),
 						recentlyProcessedInfoHashes: boom.NewStableBloomFilter(10_000_000, 2, 0.001),
+						recentlyScheduledInfoHashes: boom.NewStableBloomFilter(10_000_000, 2, 0.001),
 
-						discoveredNodes:      make(chan ktable.Node),
-						discoveredInfoHashes: make(chan nodeWithHash),
-						torrentsToPersist:    concurrency.NewBatchingChannel[hashWithMetaInfo](100, databaseBatchSize, databaseBatchInterval),
-						scrapesToPersist:     concurrency.NewBatchingChannel[hashWithScrape](100, databaseBatchSize, databaseBatchInterval),
+						discoveredNodes:             make(chan ktable.Node),
+						discoveredInfoHashes:        make(chan nodeWithHash),
+						infoHashesToScrape:          make(chan protocol.ID),
+						infoHashesToRequestMetaInfo: make(chan protocol.ID),
+						torrentsToPersist:           concurrency.NewBatchingChannel[hashWithMetaInfo](100, databaseBatchSize, databaseBatchInterval),
+						scrapesToPersist:            concurrency.NewBatchingChannel[hashWithScrape](100, databaseBatchSize, databaseBatchInterval),
 
 						soughtNodeID: &concurrency.AtomicValue[protocol.ID]{},
 

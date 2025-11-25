@@ -7,6 +7,8 @@ import (
 type Config struct {
 	ProcessNodeLimit             int
 	RequestMetaInfoLimit         int
+	ScrapeLimit                  int
+	NodeLingerInterval           time.Duration
 	BootstrapNodes               []string
 	ReseedBootstrapNodesInterval time.Duration
 	// SaveFilesThreshold specifies a maximum number of files in a torrent before file information is discarded.
@@ -25,6 +27,8 @@ func NewDefaultConfig() Config {
 	return Config{
 		ProcessNodeLimit:             100,
 		RequestMetaInfoLimit:         100,
+		ScrapeLimit:                  100,
+		NodeLingerInterval:           time.Second * 10,
 		BootstrapNodes:               defaultBootstrapNodes,
 		ReseedBootstrapNodesInterval: time.Minute,
 		SaveFilesThreshold:           100,
