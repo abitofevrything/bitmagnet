@@ -67,7 +67,6 @@ func (c *crawler) handleDiscoveredInfohashes(ctx context.Context) {
 
 			c.recentlyProcessedInfoHashes.Add(bestInfoHash.Bytes())
 
-			c.metaInfosRequestedCount++
 			c.totalProcessedHashes.With(prometheus.Labels{"result": "request_metainfo", "num_nodes": strconv.Itoa(len(bestNodes))}).Inc()
 
 			go c.requestMetaInfo(ctx, bestInfoHash, bestNodes)
@@ -103,7 +102,6 @@ func (c *crawler) handleDiscoveredInfohashes(ctx context.Context) {
 
 			c.recentlyProcessedInfoHashes.Add(bestInfoHash.Bytes())
 
-			c.scrapeCount++
 			c.totalProcessedHashes.With(prometheus.Labels{"result": "scrape", "num_nodes": strconv.Itoa(len(bestNodes))}).Inc()
 
 			go c.scrape(ctx, bestInfoHash, bestNodes)
@@ -129,15 +127,12 @@ func (c *crawler) handleDiscoveredInfohashes(ctx context.Context) {
 			for _, nodes := range prevWaitingNodes {
 				c.totalProcessedHashes.With(prometheus.Labels{"result": "skipped", "num_nodes": strconv.Itoa(len(nodes))}).Inc()
 			}
-			c.skippedHashes += len(prevWaitingNodes)
 			for _, nodes := range prevPendingMetaInfoNodes {
 				c.totalProcessedHashes.With(prometheus.Labels{"result": "dropped_pending_metainfo", "num_nodes": strconv.Itoa(len(nodes))}).Inc()
 			}
-			c.droppedMetaInfoHashes += len(prevPendingMetaInfoNodes)
 			for _, nodes := range prevPendingScrapeNodes {
 				c.totalProcessedHashes.With(prometheus.Labels{"result": "dropped_pending_scrape", "num_nodes": strconv.Itoa(len(nodes))}).Inc()
 			}
-			c.droppedScrapeHashes += len(prevPendingMetaInfoNodes)
 
 			prevWaitingNodes = waitingNodes
 			waitingNodes = make(map[protocol.ID][]ktable.Node)
@@ -151,7 +146,6 @@ func (c *crawler) handleDiscoveredInfohashes(ctx context.Context) {
 			rotate = time.After(c.hashRotationInterval)
 		case req := <-c.discoveredInfoHashes:
 			c.totalDiscoveredHashes.Inc()
-			c.discoveredNodeCount++
 
 			if c.recentlyProcessedInfoHashes.Test(req.infoHash.Bytes()) {
 				c.totalProcessedHashes.With(prometheus.Labels{"result": "already_processed", "num_nodes": "1"}).Inc()
@@ -330,7 +324,6 @@ func (c *crawler) requestMetaInfo(ctx context.Context, infoHash protocol.ID, nod
 				scrape:   scrape,
 			}
 
-			c.successfulMetaInfos++
 			return
 		}
 	}
@@ -375,7 +368,6 @@ func (c *crawler) scrape(ctx context.Context, infoHash protocol.ID, nodes []ktab
 			leechers: res.BfPeers.ApproximatedSize(),
 		}
 
-		c.successfulScrapes++
 		return
 	}
 }
